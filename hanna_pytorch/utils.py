@@ -159,7 +159,8 @@ def _set_file(path):
 
 class Tensorboard:
     def __init__(self, logdir):
-        self.writer = tf.summary.FileWriter(logdir)
+        #self.writer = tf.summary.FileWriter(logdir)
+        self.writer = tf.summary.create_file_writer(logdir)
 
     def close(self):
         self.writer.close()
