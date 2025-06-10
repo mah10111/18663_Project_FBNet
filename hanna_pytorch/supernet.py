@@ -210,7 +210,9 @@ class Trainer(object):
     self._tem_decay = temperature_decay
     self.temp = init_temperature
     self.logger = logger
-    self.tensorboard = Tensorboard('logs/'+save_tb_log)
+    #self.tensorboard = Tensorboard('logs/'+save_tb_log)
+    self.tensorboard = Tensorboard('logs/' + (save_tb_log if save_tb_log is not None else 'default_log'))
+
     self.save_theta_prefix = save_theta_prefix
 
     self._acc_avg = AvgrageMeter('acc')
