@@ -68,7 +68,7 @@ parser.add_argument('--beta', type=float, default=0, help='power term for latenc
 parser.add_argument('--gamma', type=float, default=0, help='scaling term for energy loss default 0')
 parser.add_argument('--delta', type=float, default=0, help='power term for energy loss default 0')
 parser.add_argument('--energy-file', type=str, default='new_rpi_energy.txt', help = 'target device energy file')
-parser.add_argument('--latency-file', type=str, default='speed.txt', help = 'target device latency file')
+parser.add_argument('--latency-file', type=str, default='rpi_speed.txt', help = 'target device latency file')
 args = parser.parse_args()
 
 args.model_save_path = '%s/%s/' % \
