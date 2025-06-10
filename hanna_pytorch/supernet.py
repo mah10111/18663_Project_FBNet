@@ -203,7 +203,7 @@ class Trainer(object):
     network = DataParallel(network, gpus)
     self.gpus = gpus
     self._mod = network
-    theta_params = network.theta
+    theta_params = network.module.theta
     mod_params = network.parameters()
     self.theta = theta_params
     self.w = mod_params
