@@ -341,12 +341,16 @@ class Trainer(object):
         self.w_sche.step()
       self.tensorboard.close()
 
-  def save_theta(self, save_path='theta.txt', epoch=0):
+ def save_theta(self, save_path='theta.txt', epoch=0):
     """Save theta."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     res = []
 
+    # ساخت دایرکتوری اگر وجود ندارد
     dir_path = os.path.dirname(save_path)
-    if dir_path:  # فقط اگر مسیر پوشه‌ای وجود دارد، دایرکتوری بساز
+    if dir_path:
         os.makedirs(dir_path, exist_ok=True)
 
     with open(save_path, 'w') as f:
@@ -360,10 +364,10 @@ class Trainer(object):
             s = ' '.join(str(tmp) for tmp in t_list)
             f.write(s + '\n')
 
+    # رسم heatmap بعد از خارج شدن از with
+    val = np.array(res)
+    ax = sns.heatmap(val, cbar=True, annot=True)
+    ax.figure.savefig(save_path[:-4] + '.png')  # تبدیل .txt به .png
+    plt.close()
 
-      val = np.array(res)
-      ax = sns.heatmap(val,cbar=True,annot=True)
-      ax.figure.savefig(save_path[:-3]+'png')
-      #self.tensorboard.log_image('Theta Values',val,epoch)
-      plt.close()
     return res
