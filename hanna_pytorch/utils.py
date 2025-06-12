@@ -9,7 +9,8 @@ from termcolor import colored
 from datetime import datetime
 import shutil
 import math
-import tensorflow as tf
+#import tensorflow as tf
+from tensorboardX import SummaryWriter
 
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
@@ -165,11 +166,14 @@ class Tensorboard:
     def close(self):
         self.writer.close()
 
-    def log_scalar(self, tag, value, global_step):
-        summary = tf.Summary()
-        summary.value.add(tag=tag, simple_value=value)
-        self.writer.add_summary(summary, global_step=global_step)
-        self.writer.flush()
+    #def log_scalar(self, tag, value, global_step):
+    #    summary = tf.Summary()
+    #    summary.value.add(tag=tag, simple_value=value)
+    #    self.writer.add_summary(summary, global_step=global_step)
+    #   self.writer.flush()
+    def log_scalar(self,tag, value, global_step):
+        self.writer.add_scalar(tag, global_step, value)
+        self.writer = SummaryWriter(logdir)
     def log_image(self, tag, img, global_step):
         s = io.BytesIO()
         Image.fromarray(img).save(s, format='png')
