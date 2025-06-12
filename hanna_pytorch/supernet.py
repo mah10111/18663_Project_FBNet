@@ -281,9 +281,9 @@ class Trainer(object):
     # Get status
     #batch_size = self.module._mod.batch_size
     try:
-    batch_size = self._mod.module.batch_size
+     batch_size = self._mod.module.batch_size
     except AttributeError:
-    batch_size = self._mod.batch_size
+     batch_size = self._mod.batch_size
     self._acc_avg.update(acc)
     self._ce_avg.update(ce)
     self._lat_avg.update(lat)
