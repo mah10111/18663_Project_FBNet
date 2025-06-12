@@ -341,7 +341,7 @@ class Trainer(object):
         self.w_sche.step()
       self.tensorboard.close()
 
- def save_theta(self, save_path='theta.txt', epoch=0):
+  def save_theta(self, save_path='theta.txt', epoch=0):
     """Save theta."""
     import matplotlib.pyplot as plt
     import seaborn as sns
