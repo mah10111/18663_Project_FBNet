@@ -6,7 +6,7 @@ import numpy as np
 import seaborn as sns
 import time
 import logging
-
+import os
 np.random.seed(0)
 sns.set()
 from utils import AvgrageMeter, weights_init, \
