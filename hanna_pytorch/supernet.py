@@ -363,7 +363,30 @@ class Trainer(object):
             res.append(t_list)
             s = ' '.join(str(tmp) for tmp in t_list)
             f.write(s + '\n')
+  def build_flops_lut(model, dummy_input, save_path="flops.txt"):
+    model.eval()
+    lut = []
 
+    for layer_idx, block in enumerate(model._blocks):
+        if isinstance(block, list):  # فقط روی لایه‌های MixedOp
+            block_flops = []
+            for candidate in block:
+                macs, _ = get_model_complexity_info(
+                    candidate, 
+                    (dummy_input.size(1), dummy_input.size(2), dummy_input.size(3)), 
+                    as_strings=False, 
+                    print_per_layer_stat=False
+                )
+                flops = macs * 2  # تبدیل MAC به FLOP
+                block_flops.append(flops)
+            lut.append(block_flops)
+
+    # ذخیره در فایل
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, "w") as f:
+        for row in lut:
+            f.write(" ".join(map(str, row)) + "\n")
+    print(f"[INFO] FLOPs LUT saved to {save_path}")
     # رسم heatmap بعد از خارج شدن از with
     val = np.array(res)
     ax = sns.heatmap(val, cbar=True, annot=True)
@@ -371,3 +394,4 @@ class Trainer(object):
     plt.close()
 
     return res
+
