@@ -6,12 +6,11 @@ import numpy as np
 import seaborn as sns
 import time
 import logging
-
+import os
 np.random.seed(0)
 sns.set()
 from utils import AvgrageMeter, weights_init, \
                   CosineDecayLR, Tensorboard
-#from data_parallel import DataParallel
 from torch.nn import DataParallel
 
 class MixedOp(nn.Module):
@@ -204,14 +203,16 @@ class Trainer(object):
     network = DataParallel(network, gpus)
     self.gpus = gpus
     self._mod = network
-    theta_params = network.theta
+    theta_params = network.module.theta
     mod_params = network.parameters()
     self.theta = theta_params
     self.w = mod_params
     self._tem_decay = temperature_decay
     self.temp = init_temperature
     self.logger = logger
-    self.tensorboard = Tensorboard('logs/'+save_tb_log)
+    #self.tensorboard = Tensorboard('logs/'+save_tb_log)
+    self.tensorboard = Tensorboard('logs/' + (save_tb_log if save_tb_log is not None else 'default_log'))
+
     self.save_theta_prefix = save_theta_prefix
 
     self._acc_avg = AvgrageMeter('acc')
@@ -278,8 +279,11 @@ class Trainer(object):
     loss, ce, lat, acc ,ener= func(input, target)
 
     # Get status
-    batch_size = self._mod.batch_size
-
+    #batch_size = self.module._mod.batch_size
+    try:
+     batch_size = self._mod.module.batch_size
+    except AttributeError:
+     batch_size = self._mod.batch_size
     self._acc_avg.update(acc)
     self._ce_avg.update(ce)
     self._lat_avg.update(lat)
@@ -337,23 +341,33 @@ class Trainer(object):
         self.w_sche.step()
       self.tensorboard.close()
 
-  def save_theta(self, save_path='theta.txt',epoch=0):
-    """Save theta.
-    """
-    res = []
-    with open(save_path, 'w') as f:
-      for i,t in enumerate(self.theta):
-        t_list = list(t.detach().cpu().numpy())
-        if(len(t_list) < 9): t_list.append(0.00)
-        max_index = t_list.index(max(t_list))
-        self.tensorboard.log_scalar('Layer %s'% str(i),max_index+1, epoch)
-        res.append(t_list)
-        s = ' '.join([str(tmp) for tmp in t_list])
-        f.write(s + '\n')
+  def save_theta(self, save_path='theta.txt', epoch=0):
+    """Save theta."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
 
-      val = np.array(res)
-      ax = sns.heatmap(val,cbar=True,annot=True)
-      ax.figure.savefig(save_path[:-3]+'png')
-      #self.tensorboard.log_image('Theta Values',val,epoch)
-      plt.close()
+    res = []
+
+    # ساخت دایرکتوری اگر وجود ندارد
+    dir_path = os.path.dirname(save_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+    with open(save_path, 'w') as f:
+        for i, t in enumerate(self.theta):
+            t_list = list(t.detach().cpu().numpy())
+            if len(t_list) < 9:
+                t_list.append(0.00)
+            max_index = t_list.index(max(t_list))
+            self.tensorboard.log_scalar(f'Layer {i}', max_index + 1, epoch)
+            res.append(t_list)
+            s = ' '.join(str(tmp) for tmp in t_list)
+            f.write(s + '\n')
+
+    # رسم heatmap بعد از خارج شدن از with
+    val = np.array(res)
+    ax = sns.heatmap(val, cbar=True, annot=True)
+    ax.figure.savefig(save_path[:-4] + '.png')  # تبدیل .txt به .png
+    plt.close()
+
     return res
