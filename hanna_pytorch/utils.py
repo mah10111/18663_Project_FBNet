@@ -158,6 +158,7 @@ def load_flops_lut(file_path):
         flops = [[float(x) for x in line.strip().split()] for line in f.readlines()]
     
     return flops
+  
 def _set_file(path):
     if os.path.isfile(path):
         backup_name = path + '.' + _get_time_str()
@@ -168,7 +169,35 @@ def _set_file(path):
         encoding='utf-8', mode='w')
     hdl.setFormatter(_MyFormatter(datefmt='%m%d %H:%M:%S'))
     _logger.addHandler(hdl)
+  
+import torch
+import torch.nn.functional as F
 
+def gumbel_softmax(logits, temperature=1.0, hard=False, eps=1e-10):
+  
+    gumbels = -torch.empty_like(logits).exponential_().log()  # Gumbel(0,1)
+    gumbels = (logits + gumbels) / temperature
+    y_soft = F.softmax(gumbels, dim=-1)
+
+    if hard:
+        # حالت one-hot
+        index = y_soft.max(dim=-1, keepdim=True)[1]
+        y_hard = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+        ret = y_hard - y_soft.detach() + y_soft
+    else:
+        ret = y_soft
+    return ret
+
+
+def load_flops_lut(file_path):
+    # """
+    #خواندن FLOPs LUT از فایل txt
+    #"""
+    lut = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            lut.append([float(x) for x in line.strip().split()])
+    return torch.tensor(lut)
 from torch.utils.tensorboard import SummaryWriter
 
 class Tensorboard:
@@ -188,34 +217,7 @@ class Tensorboard:
         self.writer.add_figure(tag, figure, global_step)
 
 
-    import torch
-    import torch.nn.functional as F
-
-    def gumbel_softmax(logits, temperature=1.0, hard=False, eps=1e-10):
-  
-        gumbels = -torch.empty_like(logits).exponential_().log()  # Gumbel(0,1)
-        gumbels = (logits + gumbels) / temperature
-        y_soft = F.softmax(gumbels, dim=-1)
-
-        if hard:
-        # حالت one-hot
-            index = y_soft.max(dim=-1, keepdim=True)[1]
-            y_hard = torch.zeros_like(logits).scatter_(-1, index, 1.0)
-            ret = y_hard - y_soft.detach() + y_soft
-        else:
-            ret = y_soft
-        return ret
-
-
-    def load_flops_lut(file_path):
-    # """
-    #خواندن FLOPs LUT از فایل txt
-    #"""
-        lut = []
-        with open(file_path, 'r') as f:
-            for line in f:
-                lut.append([float(x) for x in line.strip().split()])
-        return torch.tensor(lut)
+    
 
 
 
