@@ -97,7 +97,7 @@ class FBNet(nn.Module):
       _energy = f.readlines()
 
     self._energy = [[float (t) for t in s.strip().split(' ')] for s in _energy]
-###############################################
+    ###############################################
 	self._flops = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
 #############################################
     # TODO
