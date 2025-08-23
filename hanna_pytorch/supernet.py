@@ -7,7 +7,7 @@ from utils import gumbel_softmax, load_flops_lut
 from utils import weights_init, load_flops_lut 
 from torch.nn import DataParallel
 
-from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter
+from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut
 class FBNet(nn.Module):
     def __init__(self, num_classes, blocks,
                  init_theta=1.0,
