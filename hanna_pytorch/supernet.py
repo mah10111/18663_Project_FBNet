@@ -38,6 +38,7 @@ class FBNet(nn.Module):
                init_theta=1.0,
                speed_f='./speed.txt',
                energy_f='./energy.txt',
+			   flops_f='./flops_lut.txt',   # مسیر LUT FLOPs
                alpha=0,
                beta=0,
                gamma=0,
@@ -96,6 +97,8 @@ class FBNet(nn.Module):
       _energy = f.readlines()
 
     self._energy = [[float (t) for t in s.strip().split(' ')] for s in _energy]
+###############################################
+	self._flops = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
 #############################################
     # TODO
     max_len = max([len(s) for s in self._speed])
@@ -139,6 +142,7 @@ class FBNet(nn.Module):
     theta_idx = 0
     lat = []
     ener = []
+	flops_acc = []  # 🔵 اضافه شده: برای محاسبه FLOPs
     for l_idx in range(self._input_conv_count, len(self._blocks)):
       block = self._blocks[l_idx]
       if isinstance(block, list):
@@ -156,6 +160,11 @@ class FBNet(nn.Module):
         ener_ = weight * energy.repeat(batch_size, 1)
         lat.append(torch.sum(lat_))
         ener.append(torch.sum(ener_))
+		 # 🔵 اضافه شده: محاسبه FLOPs از LUT
+        if self._flops is not None:
+            flops_row = self._flops[theta_idx][:blk_len].to(weight.device)
+            flops_blk = weight * flops_row.repeat(batch_size, 1)
+            flops_acc.append(torch.sum(flops_blk)) 
         data = self._ops[theta_idx](data, weight)
         theta_idx += 1
       else:
@@ -164,6 +173,11 @@ class FBNet(nn.Module):
     data = self._output_conv(data)
     lat = sum(lat)
     ener = sum(ener)
+	self.flops_loss = sum(flops_acc) / batch_size if len(flops_acc) > 0 else torch.tensor(0.0, device=input.device)  # 🔵 اضافه شده
+    self.flops_loss = total_flops
+	 # 🔵 محاسبه تعداد دفعات استفاده از cores
+    self.cores_usage = total_flops / core_flops
+	  
     data = nn.functional.avg_pool2d(data, data.size()[2:])
     data = data.reshape((batch_size, -1))
     logits = self.classifier(data)
@@ -171,8 +185,14 @@ class FBNet(nn.Module):
     self.ce = self._criterion(logits, target).sum()
     self.lat_loss = lat / batch_size
     self.ener_loss = ener / batch_size
-    self.loss = self.ce +  self._alpha * self.lat_loss.pow(self._beta) + self._gamma * self.ener_loss.pow(self._delta)
+  #  self.loss = self.ce +  self._alpha * self.lat_loss.pow(self._beta) + self._gamma * self.ener_loss.pow(self._delta)
+    self.loss = (self.ce 
+                 + self._alpha * self.lat_loss.pow(self._beta) 
+                 + self._gamma * self.ener_loss.pow(self._delta)
+                 + lambda_core * self.cores_usage)  # وزن lambda_core
 
+
+	  
     pred = torch.argmax(logits, dim=1)
     # succ = torch.sum(pred == target).cpu().numpy() * 1.0
     self.acc = torch.sum(pred == target).float() / batch_size
