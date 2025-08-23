@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from utils import gumbel_softmax, load_flops_lut
 from utils import weights_init, load_flops_lut 
-
+from torch.nn import DataParallel
 
 class FBNet(nn.Module):
     def __init__(self, num_classes, blocks,
