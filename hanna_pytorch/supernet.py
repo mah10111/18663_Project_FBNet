@@ -21,7 +21,7 @@ class FBNet(nn.Module):
                  delta=0,
                  criterion=nn.CrossEntropyLoss()):
         super(FBNet, self).__init__()
-
+        self._flops = None
         self._blocks = blocks
         self._criterion = criterion
         self._alpha = alpha
