@@ -28,7 +28,7 @@ class FBNet(nn.Module):
         self._beta = beta
         self._gamma = gamma
         self._delta = delta
-
+        self._ops = []
         # سرعت و انرژی
         #self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
         #self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
