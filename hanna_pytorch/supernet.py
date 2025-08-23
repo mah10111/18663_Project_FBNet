@@ -26,11 +26,26 @@ class FBNet(nn.Module):
         self._delta = delta
 
         # سرعت و انرژی
-        self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
-        self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
+        #self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
+        #self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
+        if os.path.exists(speed_f):
+            with open(speed_f, 'r') as f:
+                _speed = f.readlines()
+            self._speed = [[float(t) for t in s.strip().split()] for s in _speed]
+            self._speed = torch.tensor(self._speed, requires_grad=False)
+        else:
+            self._speed = None
 
+# خواندن انرژی
+        if os.path.exists(energy_f):
+            with open(energy_f, 'r') as f:
+                _energy = f.readlines()
+            self._energy = [[float(t) for t in s.strip().split()] for s in _energy]
+            self._energy = torch.tensor(self._energy, requires_grad=False)
+        else:
+            self._energy = None
         # FLOPs LUT
-        self._flops = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
+            self._flops = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
 
         # theta
         self.theta = nn.ParameterList()
