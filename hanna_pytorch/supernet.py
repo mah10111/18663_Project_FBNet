@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from utils import gumbel_softmax, load_flops_lut
 from utils import weights_init, load_flops_lut 
 from torch.nn import DataParallel
+import time
 
 from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut,CosineDecayLR
 class FBNet(nn.Module):
