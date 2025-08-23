@@ -127,7 +127,7 @@ class FBNet(nn.Module):
 
 
 class Trainer:
-    def __init__(self, networkw_lr=0.01,
+    def __init__(self, network,w_lr=0.01,
              w_mom=0.9,
              w_wd=1e-4,
              t_lr=0.001,
