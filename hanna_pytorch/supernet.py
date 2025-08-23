@@ -1,3 +1,4 @@
+import logging
 import os
 import torch
 import torch.nn as nn
@@ -134,7 +135,7 @@ class Trainer:
              t_beta=(0.5, 0.999),
              init_temperature=5.0,
              temperature_decay=0.965,
-             logger=_logger,
+             logger=logging,
              lr_scheduler={'T_max' : 200},
              gpus=[0],
              save_theta_prefix='',
