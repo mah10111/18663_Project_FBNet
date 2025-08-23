@@ -11,7 +11,8 @@ np.random.seed(0)
 sns.set()
 from utils import AvgrageMeter, weights_init, \
                   CosineDecayLR, Tensorboard
-from data_parallel import DataParallel
+#from data_parallel import DataParallel
+from torch.nn import DataParallel
 
 class MixedOp(nn.Module):
   """Mixed operation.
