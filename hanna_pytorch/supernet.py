@@ -140,7 +140,8 @@ class Trainer:
              gpus=[0],
              save_theta_prefix='',
              save_tb_log=''):
-        self.network = network
-        theta_params = network.theta
-        self.theta_optimizer = torch.optim.Adam(theta_params, lr=1e-3)
-        self.net_optimizer = torch.optim.SGD(network.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
+                 
+                self.network = network
+                theta_params = network.theta
+                self.theta_optimizer = torch.optim.Adam(theta_params, lr=1e-3)
+                self.net_optimizer = torch.optim.SGD(network.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
