@@ -145,6 +145,19 @@ def _getlogger():
 _logger = _getlogger()
 def _get_time_str():
     return datetime.now().strftime('%m%d-%H%M%S')
+def load_flops_lut(file_path):
+    """
+    Load FLOPs LUT from a text file.
+    Each line corresponds to a layer, with FLOPs of candidate blocks separated by spaces.
+    Returns a list of lists of floats.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"{file_path} not found")
+    
+    with open(file_path, 'r') as f:
+        flops = [[float(x) for x in line.strip().split()] for line in f.readlines()]
+    
+    return flops
 def _set_file(path):
     if os.path.isfile(path):
         backup_name = path + '.' + _get_time_str()
