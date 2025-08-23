@@ -126,7 +126,19 @@ class FBNet(nn.Module):
 
 
 class Trainer:
-    def __init__(self, network):
+    def __init__(self, networkw_lr=0.01,
+             w_mom=0.9,
+             w_wd=1e-4,
+             t_lr=0.001,
+             t_wd=3e-3,
+             t_beta=(0.5, 0.999),
+             init_temperature=5.0,
+             temperature_decay=0.965,
+             logger=logging,
+             lr_scheduler={'T_max' : 200},
+             gpus=[0],
+             save_theta_prefix='',
+             save_tb_log=''):
         self.network = network
         theta_params = network.theta
         self.theta_optimizer = torch.optim.Adam(theta_params, lr=1e-3)
