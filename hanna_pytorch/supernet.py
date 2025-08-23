@@ -126,8 +126,8 @@ class FBNet(nn.Module):
         return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss, self.flops_loss
 
 
-class Trainer:
-  class Trainer(object):
+
+class Trainer(object):
   """Training network parameters and theta separately.
   """
   def __init__(self, network,
