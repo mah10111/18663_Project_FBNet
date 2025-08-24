@@ -381,24 +381,25 @@ class Trainer(object):
       self.tensorboard.close()
 
   def save_theta(self, save_path='theta.txt', epoch=0):
-	  os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    # ایجاد پوشه در صورت عدم وجود
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-      res = []
-      with open(save_path, 'w') as f:
-          for i, t in enumerate(self.theta):
-              t_list = list(t.detach().cpu().numpy())
-              if len(t_list) < 9:
-                  t_list.append(0.00)
-              max_index = t_list.index(max(t_list))
-              self.tensorboard.log_scalar('Layer %s' % str(i), max_index + 1, epoch)
-              res.append(t_list)
-              s = ' '.join([str(tmp) for tmp in t_list])
-              f.write(s + '\n')
+    res = []
+    with open(save_path, 'w') as f:
+        for i, t in enumerate(self.theta):
+            t_list = list(t.detach().cpu().numpy())
+            if len(t_list) < 9:
+                t_list.append(0.00)
+            max_index = t_list.index(max(t_list))
+            self.tensorboard.log_scalar('Layer %s' % str(i), max_index + 1, epoch)
+            res.append(t_list)
+            s = ' '.join([str(tmp) for tmp in t_list])
+            f.write(s + '\n')
 
-          val = np.array(res)
-          ax = sns.heatmap(val, cbar=True, annot=True)
-          ax.figure.savefig(save_path[:-3] + 'png')
-          # self.tensorboard.log_image('Theta Values', val, epoch)
-          plt.close()
+        val = np.array(res)
+        ax = sns.heatmap(val, cbar=True, annot=True)
+        ax.figure.savefig(save_path[:-3] + 'png')
+        # self.tensorboard.log_image('Theta Values', val, epoch)
+        plt.close()
 
-      return res
+    return res
