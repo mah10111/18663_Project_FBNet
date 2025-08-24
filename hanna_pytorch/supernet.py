@@ -41,7 +41,7 @@ class FBNet(nn.Module):
                  delta=0,
                  criterion=nn.CrossEntropyLoss(),
 				dim_feature=1984):
-        super(FBNet, self).__init__()
+     super(FBNet, self).__init__()
 		init_func = lambda x: nn.init.constant_(x, init_theta)
         self._flops = None
         self._blocks = blocks
