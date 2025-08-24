@@ -39,8 +39,10 @@ class FBNet(nn.Module):
                  beta=0,
                  gamma=0,
                  delta=0,
-                 criterion=nn.CrossEntropyLoss()):
+                 criterion=nn.CrossEntropyLoss(),
+				dim_feature=1984):
         super(FBNet, self).__init__()
+		init_func = lambda x: nn.init.constant_(x, init_theta)
         self._flops = None
         self._blocks = blocks
         self._criterion = criterion
@@ -48,17 +50,46 @@ class FBNet(nn.Module):
         self._beta = beta
         self._gamma = gamma
         self._delta = delta
-        self._ops =nn.ModuleList()
+	    self._criterion = nn.CrossEntropyLoss().cuda()
+        self.theta = []
+        self._ops = nn.ModuleList()
+        self._blocks = blocks
         # سرعت و انرژی
         #self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
         #self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
-        if os.path.exists(speed_f):
-            with open(speed_f, 'r') as f:
-                _speed = f.readlines()
-            self._speed = [[float(t) for t in s.strip().split()] for s in _speed]
-            self._speed = torch.tensor(self._speed, requires_grad=False)
-        else:
-            self._speed = None
+        tmp = []
+        input_conv_count = 0
+        for b in blocks:
+          if isinstance(b, nn.Module):
+            tmp.append(b)
+            input_conv_count += 1
+          else:
+            break
+        self._input_conv = nn.Sequential(*tmp)
+        self._input_conv_count = input_conv_count
+        for b in blocks:
+          if isinstance(b, list):
+            num_block = len(b)
+            theta = nn.Parameter(torch.ones((num_block, )).cuda(), requires_grad=True)
+            init_func(theta)
+            self.theta.append(theta)
+            self._ops.append(MixedOp(b))
+            input_conv_count += 1
+        tmp = []
+        for b in blocks[input_conv_count:]:
+          if isinstance(b, nn.Module):
+          tmp.append(b)
+          input_conv_count += 1
+          else:
+            break
+        self._output_conv = nn.Sequential(*tmp)
+
+    # assert len(self.theta) == 22
+        with open(speed_f, 'r') as f:
+
+         _speed = f.readlines()
+       self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
+
 
 # خواندن انرژی
         if os.path.exists(energy_f):
