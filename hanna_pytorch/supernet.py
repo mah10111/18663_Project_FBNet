@@ -4,30 +4,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import gumbel_softmax, load_flops_lut
-from utils import weights_init, load_flops_lut 
+from utils import weights_init, load_flops_lut
 from torch.nn import DataParallel
 import time
 
-from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut,CosineDecayLR
+from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut, CosineDecayLR
+
 
 class MixedOp(nn.Module):
-  """Mixed operation.
-  Weighted sum of blocks.
-  """
-  def __init__(self, blocks):
-    super(MixedOp, self).__init__()
-    self._ops = nn.ModuleList()
-    for op in blocks:
-      self._ops.append(op)
+    """Mixed operation.
+    Weighted sum of blocks.
+    """
+    def __init__(self, blocks):
+        super(MixedOp, self).__init__()
+        self._ops = nn.ModuleList()
+        for op in blocks:
+            self._ops.append(op)
 
-  def forward(self, x, weights):
-    tmp = []
-    for i, op in enumerate(self._ops):
-      r = op(x)
-      w = weights[..., i].reshape((-1, 1, 1, 1))
-      res = w * r
-      tmp.append(res)
-    return sum(tmp)
+    def forward(self, x, weights):
+        tmp = []
+        for i, op in enumerate(self._ops):
+            r = op(x)
+            w = weights[..., i].reshape((-1, 1, 1, 1))
+            res = w * r
+            tmp.append(res)
+        return sum(tmp)
+
 
 class FBNet(nn.Module):
     def __init__(self, num_classes, blocks,
@@ -40,57 +42,61 @@ class FBNet(nn.Module):
                  gamma=0,
                  delta=0,
                  criterion=nn.CrossEntropyLoss(),
-				dim_feature=1984):
-     super(FBNet, self).__init__()
-	 init_func = lambda x: nn.init.constant_(x, init_theta)
-     self._flops = None
-     self._blocks = blocks
-     self._criterion = criterion
-     self._alpha = alpha
-     self._beta = beta
+                 dim_feature=1984):
+        super(FBNet, self).__init__()
+
+        init_func = lambda x: nn.init.constant_(x, init_theta)
+
+        self._flops = None
+        self._blocks = blocks
+        self._criterion = criterion
+        self._alpha = alpha
+        self._beta = beta
         self._gamma = gamma
         self._delta = delta
-	    self._criterion = nn.CrossEntropyLoss().cuda()
+        self._criterion = nn.CrossEntropyLoss().cuda()
+
         self.theta = []
         self._ops = nn.ModuleList()
         self._blocks = blocks
+
         # سرعت و انرژی
-        #self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
-        #self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
+        # self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
+        # self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
+
         tmp = []
         input_conv_count = 0
         for b in blocks:
-          if isinstance(b, nn.Module):
-            tmp.append(b)
-            input_conv_count += 1
-          else:
-            break
+            if isinstance(b, nn.Module):
+                tmp.append(b)
+                input_conv_count += 1
+            else:
+                break
         self._input_conv = nn.Sequential(*tmp)
         self._input_conv_count = input_conv_count
+
         for b in blocks:
-          if isinstance(b, list):
-            num_block = len(b)
-            theta = nn.Parameter(torch.ones((num_block, )).cuda(), requires_grad=True)
-            init_func(theta)
-            self.theta.append(theta)
-            self._ops.append(MixedOp(b))
-            input_conv_count += 1
+            if isinstance(b, list):
+                num_block = len(b)
+                theta = nn.Parameter(torch.ones((num_block, )).cuda(), requires_grad=True)
+                init_func(theta)
+                self.theta.append(theta)
+                self._ops.append(MixedOp(b))
+                input_conv_count += 1
+
         tmp = []
         for b in blocks[input_conv_count:]:
-          if isinstance(b, nn.Module):
-          tmp.append(b)
-          input_conv_count += 1
-          else:
-            break
+            if isinstance(b, nn.Module):
+                tmp.append(b)
+                input_conv_count += 1
+            else:
+                break
         self._output_conv = nn.Sequential(*tmp)
 
-    # assert len(self.theta) == 22
+        # assert len(self.theta) == 22
         with open(speed_f, 'r') as f:
-
-         _speed = f.readlines()
-       self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
-
-
+            _speed = f.readlines()
+        self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
 # خواندن انرژی
         if os.path.exists(energy_f):
             with open(energy_f, 'r') as f:
