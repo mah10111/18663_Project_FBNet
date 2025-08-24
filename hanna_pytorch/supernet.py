@@ -9,6 +9,26 @@ from torch.nn import DataParallel
 import time
 
 from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut,CosineDecayLR
+
+class MixedOp(nn.Module):
+  """Mixed operation.
+  Weighted sum of blocks.
+  """
+  def __init__(self, blocks):
+    super(MixedOp, self).__init__()
+    self._ops = nn.ModuleList()
+    for op in blocks:
+      self._ops.append(op)
+
+  def forward(self, x, weights):
+    tmp = []
+    for i, op in enumerate(self._ops):
+      r = op(x)
+      w = weights[..., i].reshape((-1, 1, 1, 1))
+      res = w * r
+      tmp.append(res)
+    return sum(tmp)
+
 class FBNet(nn.Module):
     def __init__(self, num_classes, blocks,
                  init_theta=1.0,
@@ -28,7 +48,7 @@ class FBNet(nn.Module):
         self._beta = beta
         self._gamma = gamma
         self._delta = delta
-        self._ops = []
+        self._ops =nn.ModuleList()
         # سرعت و انرژی
         #self._speed = torch.load(speed_f) if os.path.exists(speed_f) else None
         #self._energy = torch.load(energy_f) if os.path.exists(energy_f) else None
