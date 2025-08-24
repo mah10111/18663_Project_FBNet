@@ -9,6 +9,24 @@ from torch.nn import DataParallel
 import time
 
 from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut, CosineDecayLR
+class MixedOp(nn.Module):
+  """Mixed operation.
+  Weighted sum of blocks.
+  """
+  def __init__(self, blocks):
+    super(MixedOp, self).__init__()
+    self._ops = nn.ModuleList()
+    for op in blocks:
+      self._ops.append(op)
+
+  def forward(self, x, weights):
+    tmp = []
+    for i, op in enumerate(self._ops):
+      r = op(x)
+      w = weights[..., i].reshape((-1, 1, 1, 1))
+      res = w * r
+      tmp.append(res)
+    return sum(tmp)
 
 
 class FBNet(nn.Module):
