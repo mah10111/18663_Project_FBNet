@@ -134,9 +134,9 @@ class FBNet(nn.Module):
            if isinstance(block, list):
              blk_len = len(block)
              if theta_list is None:
-             theta = self.theta[theta_idx]
-           else:
-             theta = theta_list[theta_idx]
+               theta = self.theta[theta_idx]
+             else:
+               theta = theta_list[theta_idx]
            t = theta.repeat(batch_size, 1)
            weight = nn.functional.gumbel_softmax(t, temperature)
 
