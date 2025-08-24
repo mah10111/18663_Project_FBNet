@@ -154,7 +154,7 @@ class FBNet(nn.Module):
 
            data = self._ops[theta_idx](data, weight)
            theta_idx += 1
-          else:
+           else:
             break
         data = self._output_conv(data)
         lat = sum(lat)
