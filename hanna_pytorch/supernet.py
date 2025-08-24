@@ -7,6 +7,11 @@ from utils import gumbel_softmax, load_flops_lut
 from utils import weights_init, load_flops_lut
 from torch.nn import DataParallel
 import time
+import os
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 
 from utils import Tensorboard, weights_init, load_flops_lut, AvgrageMeter, load_flops_lut, CosineDecayLR
 class MixedOp(nn.Module):
@@ -377,11 +382,7 @@ class Trainer(object):
 
   def save_theta(self, save_path='theta.txt', epoch=0):
     """Save theta."""
-     import os
-     import numpy as np
-     import seaborn as sns
-     import matplotlib.pyplot as plt
-
+     
     # 🔹 ایجاد پوشه در صورت عدم وجود
      os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
