@@ -198,9 +198,18 @@ class FBNet(nn.Module):
      self.acc = torch.sum(pred == target).float() / batch_size
 
     # --- در انتهای forward ---
-     max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
+    # max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
+     self.max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
 
-     return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss, max_rounds
+# اضافه کردن penalty برای max_rounds
+     rounds_loss = torch.tensor(self.max_rounds, dtype=torch.float32, device=input.device)
+
+     self.loss = ( self.ce
+         + self._alpha * self.lat_loss.pow(self._beta)
+         + self._gamma * self.ener_loss.pow(self._delta)
+         + self._eta * rounds_loss  # 🔵 پارامتر جدید برای کنترل اهمیت max_rounds
+                  )
+     return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss
 
 class Trainer(object):
   """Training network parameters and theta separately.
