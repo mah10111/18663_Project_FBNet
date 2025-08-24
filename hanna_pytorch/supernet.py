@@ -14,7 +14,7 @@ class FBNet(nn.Module):
                  init_theta=1.0,
                  speed_f='./speed.txt',
                  energy_f='./energy.txt',
-                 flops_f='./flops_lut.txt',   # مسیر LUT FLOPs
+                 flops_f='./flops.txt',   # مسیر LUT FLOPs
                  alpha=0,
                  beta=0,
                  gamma=0,
