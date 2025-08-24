@@ -121,86 +121,86 @@ class FBNet(nn.Module):
 
         self.classifier = nn.Linear(dim_feature, num_classes)
 
-   def forward(self, input, target, temperature=5.0, theta_list=None):
-    self.rounds_per_layer = []
+    def forward(self, input, target, temperature=5.0, theta_list=None):
+     self.rounds_per_layer = []
 
-    batch_size = input.size()[0]
-    self.batch_size = batch_size
-    data = self._input_conv(input)
-    theta_idx = 0
-    lat = []
-    ener = []
-    flops_acc = []  # 🔵 برای محاسبه FLOPs
+     batch_size = input.size()[0]
+     self.batch_size = batch_size
+     data = self._input_conv(input)
+     theta_idx = 0
+     lat = []
+     ener = []
+     flops_acc = []  # 🔵 برای محاسبه FLOPs
 
-    for l_idx in range(self._input_conv_count, len(self._blocks)):
-        block = self._blocks[l_idx]
-        if isinstance(block, list):
-            blk_len = len(block)
+     for l_idx in range(self._input_conv_count, len(self._blocks)):
+         block = self._blocks[l_idx]
+         if isinstance(block, list):
+             blk_len = len(block)
 
-            if theta_list is None:
-                theta = self.theta[theta_idx]
-            else:
-                theta = theta_list[theta_idx]
-
-            t = theta.repeat(batch_size, 1)
-            weight = nn.functional.gumbel_softmax(t, temperature)
-
+             if theta_list is None:
+                 theta = self.theta[theta_idx]
+             else:
+                 theta = theta_list[theta_idx]
+ 
+             t = theta.repeat(batch_size, 1)
+             weight = nn.functional.gumbel_softmax(t, temperature)
+ 
             # --- FLOPs ---
-            if self._flops is not None:
-                flops = self._flops[theta_idx][:blk_len].to(weight.device)
-                flops_ = weight * flops.repeat(batch_size, 1)
-                flops_acc.append(torch.sum(flops_))
-
+             if self._flops is not None:
+                 flops = self._flops[theta_idx][:blk_len].to(weight.device)
+                 flops_ = weight * flops.repeat(batch_size, 1)
+                 flops_acc.append(torch.sum(flops_))
+ 
             # --- Latency & Energy ---
-            speed = self._speed[theta_idx][:blk_len].to(weight.device)
-            energy = self._energy[theta_idx][:blk_len].to(weight.device)
-            lat_ = weight * speed.repeat(batch_size, 1)
-            ener_ = weight * energy.repeat(batch_size, 1)
-            lat.append(torch.sum(lat_))
-            ener.append(torch.sum(ener_))
+             speed = self._speed[theta_idx][:blk_len].to(weight.device)
+             energy = self._energy[theta_idx][:blk_len].to(weight.device)
+             lat_ = weight * speed.repeat(batch_size, 1)
+             ener_ = weight * energy.repeat(batch_size, 1)
+             lat.append(torch.sum(lat_))
+             ener.append(torch.sum(ener_))
 
             # --- Hardware Rounds ---
             # تعداد عملیات این لایه (تقریباً با FLOPs یکیه)
-            ops_this_layer = torch.sum(flops_).item()
+             ops_this_layer = torch.sum(flops_).item()
 
             # ظرفیت هر PE
-            pe_capacity = 50000  
-            num_pe = 20
-            total_capacity = num_pe * pe_capacity
+             pe_capacity = 50000  
+             num_pe = 20
+             total_capacity = num_pe * pe_capacity
 
             # چند دور طول می‌کشد تا این لایه روی سخت‌افزار اجرا شود
-            rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
-            self.rounds_per_layer.append(rounds)
+             rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
+             self.rounds_per_layer.append(rounds)
 
-            data = self._ops[theta_idx](data, weight)
-            theta_idx += 1
-        else:
-            break
+             data = self._ops[theta_idx](data, weight)
+             theta_idx += 1
+         else:
+             break
 
     # --- خروجی نهایی ---
-    data = self._output_conv(data)
-    lat = sum(lat)
-    ener = sum(ener)
-    data = nn.functional.avg_pool2d(data, data.size()[2:])
-    data = data.reshape((batch_size, -1))
-    logits = self.classifier(data)
+     data = self._output_conv(data)
+     lat = sum(lat)
+     ener = sum(ener)
+     data = nn.functional.avg_pool2d(data, data.size()[2:])
+     data = data.reshape((batch_size, -1))
+     logits = self.classifier(data)
 
-    self.ce = self._criterion(logits, target).sum()
-    self.lat_loss = lat / batch_size
-    self.ener_loss = ener / batch_size
-    self.loss = self.ce + self._alpha * self.lat_loss.pow(self._beta) + \
-                self._gamma * self.ener_loss.pow(self._delta)
+     self.ce = self._criterion(logits, target).sum()
+     self.lat_loss = lat / batch_size
+     self.ener_loss = ener / batch_size
+     self.loss = self.ce + self._alpha * self.lat_loss.pow(self._beta) + \
+                 self._gamma * self.ener_loss.pow(self._delta)
 
-    self.flops_loss = sum(flops_acc) / batch_size if len(flops_acc) > 0 \
-                      else torch.tensor(0.0, device=input.device)  # 🔵 FLOPs
+     self.flops_loss = sum(flops_acc) / batch_size if len(flops_acc) > 0 \
+                       else torch.tensor(0.0, device=input.device)  # 🔵 FLOPs
 
-    pred = torch.argmax(logits, dim=1)
-    self.acc = torch.sum(pred == target).float() / batch_size
+     pred = torch.argmax(logits, dim=1)
+     self.acc = torch.sum(pred == target).float() / batch_size
 
     # --- در انتهای forward ---
-    max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
+     max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
 
-    return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss, max_rounds
+     return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss, max_rounds
 
 class Trainer(object):
   """Training network parameters and theta separately.
