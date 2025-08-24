@@ -130,32 +130,32 @@ class FBNet(nn.Module):
         ener = []
         flops_acc = []  # 🔵 اضافه شده: برای محاسبه FLOPs
         for l_idx in range(self._input_conv_count, len(self._blocks)):
-    block = self._blocks[l_idx]
-    if isinstance(block, list):
-        blk_len = len(block)
-        if theta_list is None:
-            theta = self.theta[theta_idx]
-        else:
-            theta = theta_list[theta_idx]
-        t = theta.repeat(batch_size, 1)
-        weight = nn.functional.gumbel_softmax(t, temperature)
+          block = self._blocks[l_idx]
+          if isinstance(block, list):
+              blk_len = len(block)
+              if theta_list is None:
+                  theta = self.theta[theta_idx]
+              else:
+                  theta = theta_list[theta_idx]
+              t = theta.repeat(batch_size, 1)
+              weight = nn.functional.gumbel_softmax(t, temperature)
 
-        if self._flops is not None:
-            flops = self._flops[theta_idx][:blk_len].to(weight.device)
-            flops_ = weight * flops.repeat(batch_size, 1)
-            flops_acc.append(torch.sum(flops_))
+              if self._flops is not None:
+                  flops = self._flops[theta_idx][:blk_len].to(weight.device)
+                  flops_ = weight * flops.repeat(batch_size, 1)
+                  flops_acc.append(torch.sum(flops_))
 
-        speed = self._speed[theta_idx][:blk_len].to(weight.device)
-        energy = self._energy[theta_idx][:blk_len].to(weight.device)
-        lat_ = weight * speed.repeat(batch_size, 1)
-        ener_ = weight * energy.repeat(batch_size, 1)
-        lat.append(torch.sum(lat_))
-        ener.append(torch.sum(ener_))
+              speed = self._speed[theta_idx][:blk_len].to(weight.device)
+              energy = self._energy[theta_idx][:blk_len].to(weight.device)
+              lat_ = weight * speed.repeat(batch_size, 1)
+              ener_ = weight * energy.repeat(batch_size, 1)
+              lat.append(torch.sum(lat_))
+              ener.append(torch.sum(ener_))
 
-        data = self._ops[theta_idx](data, weight)
-        theta_idx += 1
-    else:
-        break
+              data = self._ops[theta_idx](data, weight)
+              theta_idx += 1
+          else:
+              break
         data = self._output_conv(data)
         lat = sum(lat)
         ener = sum(ener)
