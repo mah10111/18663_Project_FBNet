@@ -128,7 +128,7 @@ class FBNet(nn.Module):
         theta_idx = 0
         lat = []
         ener = []
-
+        flops_acc = []  # 🔵 اضافه شده: برای محاسبه FLOPs
         for l_idx in range(self._input_conv_count, len(self._blocks)):
             block = self._blocks[l_idx]
             if isinstance(block, list):
@@ -139,6 +139,10 @@ class FBNet(nn.Module):
                     theta = theta_list[theta_idx]
                 t = theta.repeat(batch_size, 1)
                 weight = nn.functional.gumbel_softmax(t, temperature)
+				if self._flops is not None:
+                  flops = self._flops[theta_idx][:blk_len].to(weight.device)
+                  flops_ = weight * flops.repeat(batch_size, 1)
+                  flops_acc.append(torch.sum(flops_))
                 speed = self._speed[theta_idx][:blk_len].to(weight.device)
                 energy = self._energy[theta_idx][:blk_len].to(weight.device)
                 lat_ = weight * speed.repeat(batch_size, 1)
@@ -161,7 +165,7 @@ class FBNet(nn.Module):
         self.lat_loss = lat / batch_size
         self.ener_loss = ener / batch_size
         self.loss = self.ce + self._alpha * self.lat_loss.pow(self._beta) + self._gamma * self.ener_loss.pow(self._delta)
-
+        self.flops_loss = sum(flops_acc) / batch_size if len(flops_acc) > 0 else torch.tensor(0.0, device=input.device)  # 🔵 اضافه شده
         pred = torch.argmax(logits, dim=1)
         self.acc = torch.sum(pred == target).float() / batch_size
 
