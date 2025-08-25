@@ -170,13 +170,13 @@ class FBNet(nn.Module):
 			 ops_this_layer = torch.sum(flops_).item() * 1e9  
 
 # ظرفیت هر PE
-             pe_capacity = 50000  
+			 pe_capacity = 50000  
 			 num_pe = 20
-             total_capacity = num_pe * pe_capacity
+			 total_capacity = num_pe * pe_capacity
 
 # چند دور طول می‌کشد تا این لایه روی سخت‌افزار اجرا شود
-             rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
-             self.rounds_per_layer.append(rounds)
+			 rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
+			 self.rounds_per_layer.append(rounds)
 
              data = self._ops[theta_idx](data, weight)
              theta_idx += 1
