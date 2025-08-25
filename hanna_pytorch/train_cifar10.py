@@ -30,7 +30,7 @@ class Config(object):
   init_temperature = 5.0
   temperature_decay = 0.956
   model_save_path = './term_output'
-  total_epoch = 90
+  total_epoch = 10
   start_w_epoch = 1
   train_portion = 0.8
 
