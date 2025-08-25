@@ -164,10 +164,6 @@ class FBNet(nn.Module):
              ener_ = weight * energy.repeat(batch_size, 1)
              lat.append(torch.sum(lat_))
              ener.append(torch.sum(ener_))
-
-            # --- Hardware Rounds ---
-            # تعداد عملیات این لایه (تقریباً با FLOPs یکیه)
-             #ops_this_layer = torch.sum(flops_).item()
 			 ops_this_layer = torch.sum(flops_).item() * 1e9 
 
             # ظرفیت هر PE
