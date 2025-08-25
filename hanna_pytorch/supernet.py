@@ -167,7 +167,8 @@ class FBNet(nn.Module):
 
             # --- Hardware Rounds ---
             # تعداد عملیات این لایه (تقریباً با FLOPs یکیه)
-             ops_this_layer = torch.sum(flops_).item()
+             #ops_this_layer = torch.sum(flops_).item()
+			 ops_this_layer = torch.sum(flops_).item() * 1e9 
 
             # ظرفیت هر PE
              pe_capacity = 50000  
@@ -177,7 +178,7 @@ class FBNet(nn.Module):
             # چند دور طول می‌کشد تا این لایه روی سخت‌افزار اجرا شود
              rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
              self.rounds_per_layer.append(rounds)
-
+             
              data = self._ops[theta_idx](data, weight)
              theta_idx += 1
          else:
