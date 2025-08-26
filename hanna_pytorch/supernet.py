@@ -397,47 +397,34 @@ class Trainer(object):
       self.tensorboard.close()
 
   def save_theta(self, save_path='theta.txt', epoch=0, plot=False, annot=False):
-    """Save theta values to text (fast). Optionally draw a heatmap (slow)."""
+    """Save theta values. Ensures the parent directory exists."""
+    p = Path(save_path)
+    p.parent.mkdir(parents=True, exist_ok=True)  # ← پوشه را بساز
+
     res = []
-    with open(save_path, 'w') as f:
+    with p.open('w') as f:
         for i, t in enumerate(self.theta):
             t_list = list(t.detach().cpu().numpy())
-            # هم‌ترازسازی طول‌ها با کاندیدهای واقعی اگر لازم بود:
-            # (در کدت یک صفر اضافه می‌کردی؛ اگر حداقل ۹ تا می‌خوای، همین را نگه دار)
             if len(t_list) < 9:
                 t_list.append(0.0)
-
             max_index = int(np.argmax(t_list))
-            # لاگ به TB (فقط ایندکس برنده)
             self.tensorboard.log_scalar(f'Layer {i}', max_index + 1, epoch)
-
             res.append(t_list)
             f.write(' '.join(str(v) for v in t_list) + '\n')
 
+    # (اختیاری) رسم هیت‌مپ را فقط وقتی لازم است انجام بده — پیش‌فرض خاموش.
     if plot:
         try:
             import matplotlib
-            matplotlib.use('Agg')  # backend بدون UI
+            matplotlib.use('Agg')
             import matplotlib.pyplot as plt
             import seaborn as sns
             val = np.array(res, dtype=np.float32)
-
-            # رسم سبک‌تر: بدون annot، بدون tickهای اضافه
-            ax = sns.heatmap(val, cbar=True, annot=annot, square=False)
-            ax.set_xlabel('op')
-            ax.set_ylabel('layer')
-            # تعداد تیک‌ها را محدود کن (در صورت طولانی بودن)
-            ax.set_xticks(range(min(val.shape[1], 9)))
-            ax.set_yticks(range(min(val.shape[0], 30)))
-
-            fig = ax.get_figure()
-            fig.tight_layout()
-            fig.savefig(save_path[:-3] + 'png', dpi=150)
-            plt.close(fig)
+            ax = sns.heatmap(val, cbar=True, annot=annot)
+            ax.figure.savefig(p.with_suffix('.png'))
+            plt.close(ax.figure)
         except Exception as e:
-            # اگر رسم شکست، نذار آموزش بخوابه
             self.logger.warning(f"save_theta heatmap failed: {e}")
-
     return res
 
 
