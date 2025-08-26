@@ -341,7 +341,23 @@ class Trainer(object):
       map(lambda avg: avg.reset(), [self._loss_avg, self._acc_avg, 
                                     self._ce_avg, self._lat_avg,self._ener_avg])
       self.tic = time.time()
-  
+  import torch
+
+def print_architecture(model, lut_ops=None):
+    """
+    نمایش معماری انتخاب‌شده از FBNet سوپرنت
+    model: شیء FBNet
+    lut_ops: لیستی از نام بلوک‌ها (اختیاری، برای نمایش بهتر)
+    """
+    print("=== Selected Architecture ===")
+    for i, theta in enumerate(model.thetas):
+        op_id = torch.argmax(theta).item()   # انتخاب قوی‌ترین آپراتور
+        if lut_ops is not None and op_id < len(lut_ops):
+            op_name = lut_ops[op_id]
+        else:
+            op_name = f"op_{op_id}"
+        print(f"Layer {i}: {op_name}")
+    print("=============================")
   def search(self, train_w_ds,
             train_t_ds,
             total_epoch=90,
