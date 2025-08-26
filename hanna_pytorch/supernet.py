@@ -6,7 +6,8 @@ import numpy as np
 import seaborn as sns
 import time
 import logging
-
+import json
+from collections import OrderedDict
 np.random.seed(0)
 sns.set()
 from utils import AvgrageMeter, weights_init, \
@@ -356,3 +357,91 @@ class Trainer(object):
       #self.tensorboard.log_image('Theta Values',val,epoch)
       plt.close()
     return res
+
+
+  def export_final_architecture(self, out_json="final_arch.json", print_table=True):
+        """
+        بعد از اتمام trainِ سوپرنت صدا بزن:
+            trainer.export_final_architecture("final_arch.json")
+        خروجی:
+          - فهرست ایندکس انتخاب‌شده برای هر MixedOp
+          - نام بلاک انتخاب‌شده (از روی خود blocks پروژه)
+          - تعداد لایه‌های Mixed و کل بلاک‌های کاندید
+        """
+        # دسترسی به مدل زیری (زیر DataParallel)
+        if hasattr(self._mod, "module"):
+            net = self._mod.module
+        else:
+            net = self._mod
+
+        # جمع کردن کاندیدهای هر Mixed لایه از روی self._blocks
+        # هر entry که list باشد یعنی MixedOp با چند بلاک کاندید
+        mixed_candidates = []
+        for b in net._blocks:
+            if isinstance(b, list):
+                mixed_candidates.append(b)
+
+        # استخراج θها از self.theta که قبلاً در __init__ تنظیم شده
+        final_ops = []
+        final_names = []
+        layer_rows = []
+        for layer_idx, t in enumerate(self.theta):
+            # t: nn.Parameter با سایز [num_ops]
+            t_cpu = t.detach().cpu()
+            if t_cpu.ndim != 1:
+                raise RuntimeError(f"theta at layer {layer_idx} has unexpected shape: {tuple(t_cpu.shape)}")
+
+            num_ops = t_cpu.shape[0]
+            # گاهی در save_theta یه صفر اِضافه برای Align طول‌ها می‌گذاری؛
+            # اینجا مطمئن می‌شیم فقط به اندازهٔ واقعی کاندیدها argmax بگیریم
+            if layer_idx >= len(mixed_candidates):
+                raise RuntimeError("More thetas than MixedOp layers detected.")
+            num_real_ops = len(mixed_candidates[layer_idx])
+            if num_ops > num_real_ops:
+                t_use = t_cpu[:num_real_ops]
+            else:
+                t_use = t_cpu
+
+            best_op = int(torch.argmax(t_use).item())
+            final_ops.append(best_op)
+
+            # استخراج اسم خوانا از ماژول کاندید
+            op_mod = mixed_candidates[layer_idx][best_op]
+            op_name = type(op_mod).__name__  # اگر کلاس‌ها نام‌گذاری معنادار دارند
+            # تلاش برای کشف جزییات متداول (kernel_size, expand, groups, stride) اگر وجود داشته باشند
+            spec = OrderedDict(name=op_name)
+            for attr in ["kernel_size", "stride", "groups", "expand", "expansion", "in_channels", "out_channels"]:
+                if hasattr(op_mod, attr):
+                    v = getattr(op_mod, attr)
+                    try:
+                        spec[attr] = int(v) if isinstance(v, (int, np.integer)) else (tuple(v) if isinstance(v, (list, tuple)) else v)
+                    except:
+                        spec[attr] = str(v)
+            final_names.append(spec)
+
+            if print_table:
+                # احتمال/لوگیت‌ها رو برای شفافیت نگه می‌داریم
+                probs_row = [float(x) for x in t_use.tolist()]
+                layer_rows.append({
+                    "layer": layer_idx,
+                    "chosen_idx": best_op,
+                    "scores": probs_row,
+                    "op_name": op_name
+                })
+
+        payload = {
+            "num_mixed_layers": len(mixed_candidates),
+            "selected_ops": final_ops,          # ایندکس انتخاب‌شده برای هر لایه
+            "selected_specs": final_names,      # نام و مشخصات هر بلاک انتخاب‌شده (اگر قابل استخراج بود)
+        }
+
+        with open(out_json, "w") as f:
+            json.dump(payload, f, indent=2)
+
+        if print_table:
+            print(f"\n=== FBNet Final Architecture ({len(final_ops)} mixed layers) ===")
+            for row in layer_rows:
+                print(f"Layer {row['layer']:02d}: op={row['chosen_idx']}  name={row['op_name']}  scores={row['scores']}")
+            print(f"Saved final architecture → {out_json}")
+
+        return payload
