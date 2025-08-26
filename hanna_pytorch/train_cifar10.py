@@ -132,3 +132,4 @@ trainer.search(train_queue, val_queue,
                total_epoch=config.total_epoch,
                start_w_epoch=args.warmup,
                log_frequence=args.log_frequence)
+trainer.export_final_architecture(out_json="./final_arch.json", print_table=True)
