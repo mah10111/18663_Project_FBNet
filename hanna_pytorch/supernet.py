@@ -396,27 +396,47 @@ class Trainer(object):
         self.w_sche.step()
       self.tensorboard.close()
 
-  def save_theta(self, save_path='theta.txt', epoch=0):
-    # ایجاد پوشه در صورت عدم وجود
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
+  def save_theta(self, save_path='theta.txt', epoch=0, plot=False, annot=False):
+    """Save theta values to text (fast). Optionally draw a heatmap (slow)."""
     res = []
     with open(save_path, 'w') as f:
         for i, t in enumerate(self.theta):
             t_list = list(t.detach().cpu().numpy())
+            # هم‌ترازسازی طول‌ها با کاندیدهای واقعی اگر لازم بود:
+            # (در کدت یک صفر اضافه می‌کردی؛ اگر حداقل ۹ تا می‌خوای، همین را نگه دار)
             if len(t_list) < 9:
-                t_list.append(0.00)
-            max_index = t_list.index(max(t_list))
-            self.tensorboard.log_scalar('Layer %s' % str(i), max_index + 1, epoch)
-            res.append(t_list)
-            s = ' '.join([str(tmp) for tmp in t_list])
-            f.write(s + '\n')
+                t_list.append(0.0)
 
-        val = np.array(res)
-        ax = sns.heatmap(val, cbar=True, annot=True)
-        ax.figure.savefig(save_path[:-3] + 'png')
-        # self.tensorboard.log_image('Theta Values', val, epoch)
-        plt.close()
+            max_index = int(np.argmax(t_list))
+            # لاگ به TB (فقط ایندکس برنده)
+            self.tensorboard.log_scalar(f'Layer {i}', max_index + 1, epoch)
+
+            res.append(t_list)
+            f.write(' '.join(str(v) for v in t_list) + '\n')
+
+    if plot:
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # backend بدون UI
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+            val = np.array(res, dtype=np.float32)
+
+            # رسم سبک‌تر: بدون annot، بدون tickهای اضافه
+            ax = sns.heatmap(val, cbar=True, annot=annot, square=False)
+            ax.set_xlabel('op')
+            ax.set_ylabel('layer')
+            # تعداد تیک‌ها را محدود کن (در صورت طولانی بودن)
+            ax.set_xticks(range(min(val.shape[1], 9)))
+            ax.set_yticks(range(min(val.shape[0], 30)))
+
+            fig = ax.get_figure()
+            fig.tight_layout()
+            fig.savefig(save_path[:-3] + 'png', dpi=150)
+            plt.close(fig)
+        except Exception as e:
+            # اگر رسم شکست، نذار آموزش بخوابه
+            self.logger.warning(f"save_theta heatmap failed: {e}")
 
     return res
 
