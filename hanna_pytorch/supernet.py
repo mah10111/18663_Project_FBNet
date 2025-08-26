@@ -360,8 +360,8 @@ class Trainer(object):
     print("=============================")
   def search(self, train_w_ds,
             train_t_ds,
-            total_epoch=90,
-            start_w_epoch=10,
+            total_epoch=10,
+            start_w_epoch=5,
             log_frequence=100):
     """Search model.
     """
