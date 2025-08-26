@@ -343,7 +343,7 @@ class Trainer(object):
       self.tic = time.time()
   import torch
 
-def print_architecture(model, lut_ops=None):
+  def print_architecture(model, lut_ops=None):
     """
     نمایش معماری انتخاب‌شده از FBNet سوپرنت
     model: شیء FBNet
