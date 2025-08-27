@@ -9,7 +9,8 @@ import torchvision.transforms as transforms
 from supernet import Trainer, FBNet     # ← نسخه‌ی اصلاح‌شده‌ی قبلی
 from candblks import get_blocks
 from utils import _logger, _set_file
-
+import sys
+sys.path.insert(0, "/content/18663_Project_FBNet/hanna_pytorch")  # مسیر درست سورس
 # -------------------------
 # پیکربندی پایه
 # -------------------------
