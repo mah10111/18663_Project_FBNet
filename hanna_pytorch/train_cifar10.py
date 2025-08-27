@@ -1,36 +1,40 @@
-# train_cifar10.py  (speed-only, AMP-ready Trainer/FBNet)
-import os, time, logging, argparse
+# train_cifar10.py  (FLOPs-only, AMP-ready Trainer/FBNet)
+
+import os, sys, time, logging, argparse, json
 import numpy as np
 import torch
 from torch import nn
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 
-from supernet import Trainer, FBNet     # ← نسخه‌ی اصلاح‌شده‌ی قبلی
+# --- مسیر درست سورس را قبل از ایمپورت‌ها اضافه کن
+here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, here)
+
+from supernet import Trainer, FBNet
 from candblks import get_blocks
 from utils import _logger, _set_file
-import sys
-sys.path.insert(0, "/content/18663_Project_FBNet/hanna_pytorch")  # مسیر درست سورس
+
 # -------------------------
 # پیکربندی پایه
 # -------------------------
 class Config(object):
     num_cls_used = 0
     init_theta = 1.0
-    alpha = 0.2
-    beta = 0.6
-    speed_f = './speed_cpu.txt'
+    # ضرایب بهینه‌ساز
     w_lr = 0.1
     w_mom = 0.9
     w_wd = 1e-4
     t_lr = 0.01
     t_wd = 5e-4
     t_beta = (0.9, 0.999)
+    # دما
     init_temperature = 5.0
     temperature_decay = 0.956
+    # حلقه‌ها
     model_save_path = './term_output'
     total_epoch = 10
-    start_w_epoch = 1
+    start_w_epoch = 2
     train_portion = 0.8
 
 lr_scheduler_params = {
@@ -48,28 +52,23 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------
 # آرگومان‌ها
 # -------------------------
-parser = argparse.ArgumentParser(description="Train FBNet supernet on CIFAR-10 (speed-only loss).")
+parser = argparse.ArgumentParser(description="Train FBNet supernet on CIFAR-10 (FLOPs-only loss).")
 parser.add_argument('--batch-size', type=int, default=256, help='global batch size')
-parser.add_argument('--epochs', type=int, default=200, help='(ignored; see total_epoch in Config)')
 parser.add_argument('--log-frequence', type=int, default=100, help='log frequency (steps)')
 parser.add_argument('--gpus', type=str, default='0', help='GPU ids, e.g. "0" or "0,1"')
-parser.add_argument('--load-model-path', type=str, default=None, help='(unused)')
 parser.add_argument('--num-workers', type=int, default=4, help='DataLoader workers (train)')
-parser.add_argument('--tb-log', type=str, default='run_fbnet', help='TensorBoard log folder name')
-parser.add_argument('--warmup', type=int, default=2, help='warmup epochs (train_w only)')
-# loss scaling terms (latency only is used)
-parser.add_argument('--alpha', type=float, default=1e-2, help='latency loss scale (alpha)')
-parser.add_argument('--beta', type=float, default=1.0, help='latency loss power (beta)')
-# files
-parser.add_argument('--latency-file', type=str, default='rpi_speed.txt', help='target device latency file')
-parser.add_argument('--energy-file', type=str, default=None, help='(unused now)')
+parser.add_argument('--tb-log', type=str, default='run_fbnet_flops', help='TensorBoard log folder name')
+parser.add_argument('--warmup', type=int, default=config.start_w_epoch, help='warmup epochs (train_w only)')
+
+# --- FLOPs-only params
+parser.add_argument('--flops-file', type=str, default='flops.txt', help='LUT of FLOPs (per layer, per op)')
+parser.add_argument('--lambda-flops', type=float, default=1e-2, help='scale for FLOPs loss term (alpha)')
+parser.add_argument('--beta', type=float, default=1.0, help='power for FLOPs loss term (beta)')
 args = parser.parse_args()
 
 # paths & logs
 args.model_save_path = f"{config.model_save_path}/{args.tb_log}/"
-if not os.path.exists(args.model_save_path):
-    _logger.warn(f"{args.model_save_path} not exists, create it")
-    os.makedirs(args.model_save_path)
+os.makedirs(args.model_save_path, exist_ok=True)
 _set_file(os.path.join(args.model_save_path, 'log.log'))
 
 # -------------------------
@@ -87,13 +86,13 @@ train_transform = transforms.Compose([
 
 train_data = dset.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
 
-# توجه: برای سادگی، همان train_data را برای val هم استفاده می‌کنیم (مثل کد قبلی)
+# Colab-friendly DataLoaders
 train_queue = torch.utils.data.DataLoader(
     train_data,
     batch_size=args.batch_size,
     shuffle=True,
     pin_memory=True,
-    num_workers=max(0, min(args.num_workers, 4)),  # Colab-friendly
+    num_workers=max(0, min(args.num_workers, 4)),
     persistent_workers=True if args.num_workers > 0 else False,
 )
 
@@ -107,7 +106,7 @@ val_queue = torch.utils.data.DataLoader(
 )
 
 # -------------------------
-# مدل: فقط latency (speed) در لا‌س
+# مدل: فقط FLOPs در لا‌س (با supernet.py نسخه FLOPs-only)
 # -------------------------
 blocks = get_blocks(cifar10=True)
 num_classes = config.num_cls_used if config.num_cls_used > 0 else 10
@@ -116,25 +115,14 @@ model = FBNet(
     num_classes=num_classes,
     blocks=blocks,
     init_theta=config.init_theta,
-    # فقط latency را روشن می‌کنیم
-    use_latency=True,
-    use_energy=False,
-    use_flops=False,
-    # فایل‌ها
-    speed_f=args.latency_file,
-    energy_f=None,          # خاموش
-    flops_f=None,           # خاموش
-    # ضرایب لا‌س (latency-only)
-    alpha=args.alpha,
-    beta=args.beta,
-    gamma=0.0,
-    delta=0.0,
-    eta=0.0,                # بدون penalty rounds
+    flops_f=args.flops_file,       # ← فقط LUT-FLOPs
+    alpha=args.lambda_flops,       # ← ضریب FLOPs در لا‌س
+    beta=args.beta,                # ← توان FLOPs در لا‌س
     dim_feature=1984,
 )
 
 # -------------------------
-# ترینر (AMP داخلش فعاله)
+# ترینر
 # -------------------------
 trainer = Trainer(
     network=model,
@@ -164,5 +152,21 @@ trainer.search(
     log_frequence=args.log_frequence,
 )
 
+# -------------------------
 # خروجی معماری نهایی (argmax θ)
-trainer.export_final_architecture(out_json="./final_arch.json", print_table=True)
+# -------------------------
+out_json = "./final_arch.json"
+try:
+    # اگر متد آماده موجوده
+    trainer.export_final_architecture(out_json=out_json, print_table=True)   # ممکنه در نسخهٔ فعلی نباشه
+except Exception:
+    # fallback ساده: فقط آرگ‌مکس θها را ذخیره کن
+    net = trainer._mod.module if hasattr(trainer._mod, "module") else trainer._mod
+    selected_ops = [int(torch.argmax(t.detach().cpu()).item()) for t in net.theta]
+    payload = {"selected_ops": selected_ops}
+    with open(out_json, "w") as f:
+        json.dump(payload, f, indent=2)
+    print("\n=== FBNet Final Architecture (fallback) ===")
+    for i, op in enumerate(selected_ops):
+        print(f"Layer {i:02d}: op={op}")
+    print(f"Saved final architecture → {out_json}")
