@@ -7,6 +7,10 @@ import seaborn as sns
 import time
 import logging
 from torch.nn import DataParallel
+try:
+    from data_parallel import DataParallel as DataParallel  # اگر فایل محلی هست
+except ImportError:
+    from torch.nn import DataParallel as DataParallel
 np.random.seed(0)
 sns.set()
 from utils import AvgrageMeter, weights_init, \
