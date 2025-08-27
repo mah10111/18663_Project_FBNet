@@ -36,26 +36,31 @@ class FBNet(nn.Module):
 
   def __init__(self, num_classes, blocks,
                init_theta=1.0,
-               speed_f='./speed.txt',
-               energy_f='./energy.txt',
-               alpha=0,
-               beta=0,
-               gamma=0,
-               delta=0,
+               # ---------- فایل‌های ورودی ----------
+               speed_f='./speed.txt',     # [DISABLED-LATENCY] نگه داشته شده برای بازگشت
+               energy_f='./energy.txt',   # [DISABLED-ENERGY]  نگه داشته شده برای بازگشت
+               flops_f='./flops.txt',     # [FLOPS-ONLY]  LUTِ فلاپس
+               # ---------- ضرایب لا‌س ----------
+               alpha=0,                   # [FLOPS-ONLY] ضریب FLOPs
+               beta=1.0,                  # [FLOPS-ONLY] توان FLOPs
+               gamma=0,                   # [DISABLED-ENERGY] فقط برای سازگاری امضا
+               delta=0,                   # [DISABLED-ENERGY] فقط برای سازگاری امضا
                dim_feature=1984):
     super(FBNet, self).__init__()
     init_func = lambda x: nn.init.constant_(x, init_theta)
     
+    # ضرایب
     self._alpha = alpha
     self._beta = beta
-    self._gamma = gamma
-    self._delta = delta
+    self._gamma = gamma     # [DISABLED-ENERGY]
+    self._delta = delta     # [DISABLED-ENERGY]
     self._criterion = nn.CrossEntropyLoss().cuda()
 
     self.theta = []
     self._ops = nn.ModuleList()
     self._blocks = blocks
 
+    # ---------- لایه‌های ورودی ثابت ----------
     tmp = []
     input_conv_count = 0
     for b in blocks:
@@ -66,6 +71,8 @@ class FBNet(nn.Module):
         break
     self._input_conv = nn.Sequential(*tmp)
     self._input_conv_count = input_conv_count
+
+    # ---------- لایه‌های قابل جستجو (Mixed) ----------
     for b in blocks:
       if isinstance(b, list):
         num_block = len(b)
@@ -74,6 +81,8 @@ class FBNet(nn.Module):
         self.theta.append(theta)
         self._ops.append(MixedOp(b))
         input_conv_count += 1
+
+    # ---------- لایه‌های خروجی ثابت ----------
     tmp = []
     for b in blocks[input_conv_count:]:
       if isinstance(b, nn.Module):
@@ -83,50 +92,67 @@ class FBNet(nn.Module):
         break
     self._output_conv = nn.Sequential(*tmp)
 
-    # assert len(self.theta) == 22
-    with open(speed_f, 'r') as f:
+    # =========================================================
+    # [DISABLED-LATENCY] خواندن سرعت (latency)  ← غیر فعال اما نگه‌داری شده
+    # with open(speed_f, 'r') as f:
+    #   _speed = f.readlines()
+    # self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
 
-      _speed = f.readlines()
-    self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
+    # [DISABLED-ENERGY] خواندن انرژی               ← غیر فعال اما نگه‌داری شده
+    # with open(energy_f, 'r') as f:
+    #   _energy = f.readlines()
+    # self._energy = [[float (t) for t in s.strip().split(' ')] for s in _energy]
 
-  ###########################################33
-    energy_f = energy_f
+    # [DISABLED-LATENCY] پَد کردن ستون آخر برای سرعت
+    # if len(self._speed):
+    #   max_len = max([len(s) for s in self._speed])
+    #   iden_s = 0.0; iden_s_c = 0
+    #   for s in self._speed:
+    #     if len(s) == max_len:
+    #       iden_s += s[max_len - 1]; iden_s_c += 1
+    #   iden_s /= max(1, iden_s_c)
+    #   for i in range(len(self._speed)):
+    #     if len(self._speed[i]) == (max_len - 1):
+    #       self._speed[i].append(iden_s)
 
-    with open(energy_f, 'r') as f:
-      _energy = f.readlines()
+    # [DISABLED-ENERGY] پَد کردن ستون آخر برای انرژی
+    # if len(self._energy):
+    #   max_len = max([len(s) for s in self._energy])
+    #   iden_s = 0.0; iden_s_c = 0
+    #   for s in self._energy:
+    #     if len(s) == max_len:
+    #       iden_s += s[max_len - 1]; iden_s_c += 1
+    #   iden_s /= max(1, iden_s_c)
+    #   for i in range(len(self._energy)):
+    #     if len(self._energy[i]) == (max_len - 1):
+    #       self._energy[i].append(iden_s)
 
-    self._energy = [[float (t) for t in s.strip().split(' ')] for s in _energy]
-#############################################
-    # TODO
-    max_len = max([len(s) for s in self._speed])
-    iden_s = 0.0
-    iden_s_c = 0
-    for s in self._speed:
-      if len(s) == max_len:
-        iden_s += s[max_len - 1]
-        iden_s_c += 1
-    iden_s /= iden_s_c
-    for i in range(len(self._speed)):
-      if len(self._speed[i]) == (max_len - 1):
-        self._speed[i].append(iden_s)
-###################################################3
-    max_len = max([len(s) for s in self._energy])
-    iden_s = 0.0
-    iden_s_c = 0
-    for s in self._energy:
-      if len(s) == max_len:
-        iden_s += s[max_len - 1]
-        iden_s_c += 1
-    iden_s /= iden_s_c
-    for i in range(len(self._energy)):
-      if len(self._energy[i]) == (max_len - 1):
-        self._energy[i].append(iden_s)
-#######################################################
-    self._speed = torch.tensor(self._speed, requires_grad=False)
+    # [DISABLED-LATENCY]
+    # self._speed = torch.tensor(self._speed, requires_grad=False)
+    # [DISABLED-ENERGY]
+    # self._energy = torch.tensor(self._energy, requires_grad=False)
+    # =========================================================
 
-#######################################################
-    self._energy = torch.tensor(self._energy, requires_grad=False)
-#######################################################
+    # ---------------- FLOPs LUT (فعال) ----------------
+    # [FLOPS-ONLY] خواندن LUT فلاپس: هر خط=یک لایهٔ Mixed، هر ستون=کاندید همان لایه
+    with open(flops_f, 'r') as f:
+      _flops = f.readlines()
+    self._flops = [[float(t) for t in s.strip().split(' ')] for s in _flops]
+
+    # [FLOPS-ONLY] پَد کردن ستون آخر اگر بعضی لایه‌ها یک ستون کمتر دارند
+    if len(self._flops) > 0:
+      max_len = max([len(s) for s in self._flops])
+      iden_s = 0.0; iden_s_c = 0
+      for s in self._flops:
+        if len(s) == max_len:
+          iden_s += s[max_len - 1]; iden_s_c += 1
+      iden_s = (iden_s / iden_s_c) if iden_s_c > 0 else 0.0
+      for i in range(len(self._flops)):
+        if len(self._flops[i]) == (max_len - 1):
+          self._flops[i].append(iden_s)
+
+    self._flops = torch.tensor(self._flops, requires_grad=False)
+
     self.classifier = nn.Linear(dim_feature, num_classes)
     # TODO
     # nn.Sequential(nn.BatchNorm2d(dim_feature)
@@ -137,8 +163,12 @@ class FBNet(nn.Module):
     self.batch_size = batch_size
     data = self._input_conv(input)
     theta_idx = 0
-    lat = []
-    ener = []
+
+    # [DISABLED-LATENCY] lat = []
+    # [DISABLED-ENERGY]  ener = []
+    # [FLOPS-ONLY]
+    flops_terms = []
+
     for l_idx in range(self._input_conv_count, len(self._blocks)):
       block = self._blocks[l_idx]
       if isinstance(block, list):
@@ -148,39 +178,58 @@ class FBNet(nn.Module):
         else:
           theta = theta_list[theta_idx]
         t = theta.repeat(batch_size, 1)
-        weight = nn.functional.gumbel_softmax(t,
-                                temperature)
-        speed = self._speed[theta_idx][:blk_len].to(weight.device)
-        energy = self._energy[theta_idx][:blk_len].to(weight.device)
-        lat_ = weight * speed.repeat(batch_size, 1)
-        ener_ = weight * energy.repeat(batch_size, 1)
-        lat.append(torch.sum(lat_))
-        ener.append(torch.sum(ener_))
+        weight = nn.functional.gumbel_softmax(t, temperature)
+
+        # [DISABLED-LATENCY]
+        # speed = self._speed[theta_idx][:blk_len].to(weight.device)
+        # lat_ = weight * speed.repeat(batch_size, 1)
+        # lat.append(torch.sum(lat_))
+
+        # [DISABLED-ENERGY]
+        # energy = self._energy[theta_idx][:blk_len].to(weight.device)
+        # ener_ = weight * energy.repeat(batch_size, 1)
+        # ener.append(torch.sum(ener_))
+
+        # [FLOPS-ONLY] FLOPs term (امیدریاضی روی کاندیدها در هر batch)
+        flops_row = self._flops[theta_idx][:blk_len].to(weight.device)     # [O]
+        flops_b = weight * flops_row.repeat(batch_size, 1)                  # [B,O]
+        flops_terms.append(torch.sum(flops_b))                               # scalar
+
         data = self._ops[theta_idx](data, weight)
         theta_idx += 1
       else:
         break
 
     data = self._output_conv(data)
-    lat = sum(lat)
-    ener = sum(ener)
+    # [DISABLED-LATENCY] lat = sum(lat)
+    # [DISABLED-ENERGY]  ener = sum(ener)
     data = nn.functional.avg_pool2d(data, data.size()[2:])
     data = data.reshape((batch_size, -1))
     logits = self.classifier(data)
 
+    # ---------- losses ----------
     self.ce = self._criterion(logits, target).sum()
-    self.lat_loss = lat / batch_size
-    self.ener_loss = ener / batch_size
-    self.loss = self.ce +  self._alpha * self.lat_loss.pow(self._beta) + self._gamma * self.ener_loss.pow(self._delta)
+
+    # [FLOPS-ONLY]
+    flops_total = sum(flops_terms) if len(flops_terms) > 0 else torch.tensor(0.0, device=input.device)
+    self.lat_loss = flops_total / batch_size          # ← lat_loss = FLOPs
+    self.ener_loss = torch.tensor(0.0, device=input.device)  # انرژی نداریم
+
+    # [DISABLED-LATENCY/ENERGY] نسخهٔ قبلی:
+    # self.lat_loss = lat / batch_size
+    # self.ener_loss = ener / batch_size
+    # self.loss = self.ce +  self._alpha * self.lat_loss.pow(self._beta) + self._gamma * self.ener_loss.pow(self._delta)
+
+    # [FLOPS-ONLY] لا‌س نهایی
+    self.loss = self.ce + self._alpha * self.lat_loss.pow(self._beta)
 
     pred = torch.argmax(logits, dim=1)
-    # succ = torch.sum(pred == target).cpu().numpy() * 1.0
     self.acc = torch.sum(pred == target).float() / batch_size
     return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss
 
 class Trainer(object):
   """Training network parameters and theta separately.
-  """
+  (FLOPs-only variant; برچسب لاگ‌ها برای lat به 'FLOPs' تغییر کرده)"""
   def __init__(self, network,
                w_lr=0.01,
                w_mom=0.9,
@@ -194,7 +243,7 @@ class Trainer(object):
                lr_scheduler={'T_max' : 200},
                gpus=[0],
                save_theta_prefix='',
-	       save_tb_log=''):
+               save_tb_log=''):
     assert isinstance(network, FBNet)
     network.apply(weights_init)
     network = network.train().cuda()
@@ -215,7 +264,8 @@ class Trainer(object):
 
     self._acc_avg = AvgrageMeter('acc')
     self._ce_avg = AvgrageMeter('ce')
-    self._lat_avg = AvgrageMeter('lat')
+    # [DISABLED-LATENCY] self._lat_avg = AvgrageMeter('lat')
+    self._lat_avg = AvgrageMeter('flops')   # [FLOPS-ONLY] برچسب لاگ
     self._loss_avg = AvgrageMeter('loss')
     self._ener_avg = AvgrageMeter('ener')
 
@@ -236,27 +286,27 @@ class Trainer(object):
     """Update model parameters.
     """
     self.w_opt.zero_grad()
-    loss, ce, lat, acc,ener = self._mod(input, target, self.temp)
+    loss, ce, lat, acc, ener = self._mod(input, target, self.temp)  # lat == FLOPs
     loss.backward()
     self.w_opt.step()
     if decay_temperature:
       tmp = self.temp
       self.temp *= self._tem_decay
       self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-    return loss.item(), ce.item(), lat.item(), acc.item(),ener.item()
+    return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
   
   def train_t(self, input, target, decay_temperature=False):
     """Update theta.
     """
     self.t_opt.zero_grad()
-    loss, ce, lat, acc,ener = self._mod(input, target, self.temp)
+    loss, ce, lat, acc, ener = self._mod(input, target, self.temp)  # lat == FLOPs
     loss.backward()
     self.t_opt.step()
     if decay_temperature:
       tmp = self.temp
       self.temp *= self._tem_decay
       self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-    return loss.item(), ce.item(), lat.item(), acc.item(),ener.item()
+    return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
   
   def decay_temperature(self, decay_ratio=None):
     tmp = self.temp
@@ -274,14 +324,14 @@ class Trainer(object):
     """
     input = input.cuda()
     target = target.cuda()
-    loss, ce, lat, acc ,ener= func(input, target)
+    loss, ce, lat, acc ,ener= func(input, target)   # lat == FLOPs
 
     # Get status
     batch_size = self._mod.batch_size
 
     self._acc_avg.update(acc)
     self._ce_avg.update(ce)
-    self._lat_avg.update(lat)
+    self._lat_avg.update(lat)   # FLOPs
     self._loss_avg.update(loss)
     self._ener_avg.update(ener)
 
@@ -290,8 +340,8 @@ class Trainer(object):
       speed = 1.0 * (batch_size * log_frequence) / (self.toc - self.tic)
       self.tensorboard.log_scalar('Total Loss', self._loss_avg.getValue(), step)
       self.tensorboard.log_scalar('Accuracy',self._acc_avg.getValue(),step)
-      self.tensorboard.log_scalar('Latency',self._lat_avg.getValue(),step)
-      self.tensorboard.log_scalar('Energy',self._ener_avg.getValue(),step)
+      # [DISABLED-LATENCY] self.tensorboard.log_scalar('Latency',self._lat_avg.getValue(),step)
+      self.tensorboard.log_scalar('FLOPs', self._lat_avg.getValue(), step)   # [FLOPS-ONLY]
       self.logger.info("Epoch[%d] Batch[%d] Speed: %.6f samples/sec %s %s %s %s %s" 
               % (epoch, step, speed, self._loss_avg, 
                  self._acc_avg, self._ce_avg, self._lat_avg,self._ener_avg))
@@ -340,6 +390,10 @@ class Trainer(object):
     """Save theta.
     """
     res = []
+    # اطمینان از وجود پوشهٔ مقصد (بهبود کوچک)
+    import os
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
     with open(save_path, 'w') as f:
       for i,t in enumerate(self.theta):
         t_list = list(t.detach().cpu().numpy())
