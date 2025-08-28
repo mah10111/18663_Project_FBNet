@@ -1,4 +1,4 @@
-# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
+# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs-only (GFLOPs) + optional Rounds
 
 import os, sys, time, logging, argparse, json, importlib, inspect
 import numpy as np
@@ -37,7 +37,8 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------
 # آرگومان‌ها
 # -------------------------
-parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
+parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP and FLOPs-only loss (GFLOPs).")
+
 parser.add_argument('--batch-size', type=int, default=256)
 parser.add_argument('--log-frequence', type=int, default=100)
 parser.add_argument('--gpus', type=str, default='0')
@@ -45,24 +46,32 @@ parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
 
-# دقت شناور
+# دقت شناور (برای خاموش‌کردن AMP: --dtype fp32)
 parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
-                    help='Numerics for AMP: fp32 (off), fp16, or bf16')
+                    help='Numerics: fp32 (AMP off), fp16, bf16')
 
-# FLOPs-only (اگر نسخهٔ supernet از flops_f پشتیبانی کند)
+# FLOPs-only
 parser.add_argument('--flops-file', type=str, default='flops.txt',
                     help='FLOPs LUT (per layer, per op)')
-parser.add_argument('--lambda-flops', type=float, default=1e-2,
-                    help='scale for FLOPs loss term (alpha)')
+parser.add_argument('--flops-unit', type=str, default='gflops', choices=['gflops','mflops','flops'],
+                    help='Unit of FLOPs LUT (default: gflops)')
+parser.add_argument('--lambda-flops', type=float, default=10.0,
+                    help='alpha (scale) for FLOPs loss term; for GFLOPs typical ~10 with beta=1')
 parser.add_argument('--beta', type=float, default=1.0,
-                    help='power for FLOPs loss term (beta)')
+                    help='beta (power) for FLOPs loss term')
 
-# Latency-only (اگر نسخهٔ supernet از speed_f پشتیبانی کند)
-parser.add_argument('--latency-file', type=str, default='rpi_speed.txt',
-                    help='Latency LUT (per layer, per op)')
-parser.add_argument('--alpha', type=float, default=1e-2,
-                    help='scale for latency loss term (alpha)')
+# Rounds penalty (اختیاری)
+parser.add_argument('--eta', type=float, default=0.0, help='eta · Rounds penalty (0 to disable)')
+parser.add_argument('--rounds-agg', type=str, default='max', choices=['max','sum','mean'],
+                    help='Aggregation of per-layer rounds')
+parser.add_argument('--pe-capacity', type=int, default=50000, help='ops capacity per PE per round')
+parser.add_argument('--num-pe', type=int, default=20, help='number of PEs')
+parser.add_argument('--discrete-rounds', action='store_true',
+                    help='use ceil(no-grad) for rounds instead of soft/grad-friendly ratio')
 
+# Latency-only (برای سازگاری؛ استفاده نمی‌شود)
+parser.add_argument('--latency-file', type=str, default='rpi_speed.txt')
+parser.add_argument('--alpha', type=float, default=1e-2)
 args = parser.parse_args()
 
 # paths & logs
@@ -104,7 +113,7 @@ val_queue = torch.utils.data.DataLoader(
 )
 
 # -------------------------
-# سازندهٔ داینامیک FBNet (FLOPs یا latency)
+# سازندهٔ FBNet (FLOPs-only)
 # -------------------------
 import supernet
 importlib.reload(supernet)
@@ -124,24 +133,23 @@ common_kwargs = dict(
     dim_feature=1984,
 )
 
-if 'flops_f' in params:   # نسخهٔ FLOPs-only
-    assert os.path.exists(args.flops_file), f"Missing LUT: {args.flops_file}"
-    model = FBNet(**common_kwargs,
-                  flops_f=args.flops_file,
-                  alpha=args.lambda_flops,
-                  beta=args.beta)
-    print(">> Built FBNet (FLOPs-only).")
+assert 'flops_f' in params, "This supernet must support flops_f for FLOPs-only training."
+assert os.path.exists(args.flops_file), f"Missing LUT: {args.flops_file}"
 
-elif 'speed_f' in params: # نسخهٔ latency-only
-    assert os.path.exists(args.latency_file), f"Missing LUT: {args.latency_file}"
-    model = FBNet(**common_kwargs,
-                  speed_f=args.latency_file,
-                  alpha=args.alpha, beta=args.beta, gamma=0.0, delta=0.0)
-    print(">> Built FBNet (latency-only).")
+model = FBNet(**common_kwargs,
+              flops_f=args.flops_file,
+              flops_unit=args.flops_unit,
+              alpha=args.lambda_flops,
+              beta=args.beta,
+              # rounds (optional)
+              eta=args.eta,
+              rounds_agg=args.rounds_agg,
+              pe_capacity=args.pe_capacity,
+              num_pe=args.num_pe,
+              discrete_rounds=args.discrete_rounds)
 
-else:                      # کمینه
-    model = FBNet(**common_kwargs)
-    print(">> Built FBNet (minimal).")
+print(f">> Built FBNet (FLOPs-only). unit={args.flops_unit}, alpha={args.lambda_flops}, beta={args.beta}, "
+      f"eta={args.eta}, rounds_agg={args.rounds_agg}, PE={args.num_pe}×{args.pe_capacity}")
 
 # -------------------------
 # AmpTrainer: زیرکلاس Trainer با autocast/GradScaler
@@ -165,7 +173,6 @@ class AmpTrainer(Trainer):
 
     def train_w(self, input, target, decay_temperature=False):
         self.w_opt.zero_grad(set_to_none=True)
-        # با AMP
         with self._maybe_autocast():
             loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
         if self.scaler.is_enabled():
