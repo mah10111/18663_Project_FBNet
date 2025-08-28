@@ -1,3 +1,5 @@
+# supernet.py — FLOPs-only loss + optional Rounds penalty (GFLOPs)
+
 import os
 import time
 import logging
