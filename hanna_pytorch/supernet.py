@@ -79,7 +79,7 @@ class FBNet(nn.Module):
                  flops_unit='gflops',       # 'gflops' | 'mflops' | 'flops'
                  discrete_rounds=False,     # اگر True → ceil و بدون گرادیان
                  # ---------- سایر ----------
-                 criterion=nn.CrossEntropyLoss(),
+                 criterion=nn.CrossEntropyLoss().cuda(),
                  dim_feature=1984):
         super(FBNet, self).__init__()
 
