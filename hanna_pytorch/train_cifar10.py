@@ -1,244 +1,402 @@
-# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs-only (GFLOPs) + optional Rounds
-
-import os, sys, time, logging, argparse, json, importlib, inspect
-import numpy as np
 import torch
-from torch import nn
-import torchvision.datasets as dset
-import torchvision.transforms as transforms
+import torch.nn as nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import time
+import logging
 
-# --- مسیر سورس را قبل از ایمپورت‌ها اضافه کن
-here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, here)
+np.random.seed(0)
+sns.set()
+from utils import AvgrageMeter, weights_init, \
+                  CosineDecayLR, Tensorboard
 
-from supernet import Trainer, FBNet
-from candblks import get_blocks
-from utils import _logger, _set_file
-
-# -------------------------
-# پیکربندی پایه
-# -------------------------
-class Config(object):
-    num_cls_used = 0
-    init_theta = 1.0
-    # آپتیمایزر
-    w_lr = 0.1; w_mom = 0.9; w_wd = 1e-4
-    t_lr = 0.01; t_wd = 5e-4; t_beta = (0.9, 0.999)
-    # دما
-    init_temperature = 5.0; temperature_decay = 0.956
-    # حلقه‌ها
-    model_save_path = './term_output'
-    total_epoch = 10
-    start_w_epoch = 2
-
-config = Config()
-logging.basicConfig(level=logging.INFO)
-
-# -------------------------
-# آرگومان‌ها
-# -------------------------
-parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP and FLOPs-only loss (GFLOPs).")
-
-parser.add_argument('--batch-size', type=int, default=256)
-parser.add_argument('--log-frequence', type=int, default=100)
-parser.add_argument('--gpus', type=str, default='0')
-parser.add_argument('--num-workers', type=int, default=4)
-parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
-parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
-
-# دقت شناور (برای خاموش‌کردن AMP: --dtype fp32)
-parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
-                    help='Numerics: fp32 (AMP off), fp16, bf16')
-
-# FLOPs-only
-parser.add_argument('--flops-file', type=str, default='flops.txt',
-                    help='FLOPs LUT (per layer, per op)')
-parser.add_argument('--flops-unit', type=str, default='gflops', choices=['gflops','mflops','flops'],
-                    help='Unit of FLOPs LUT (default: gflops)')
-parser.add_argument('--lambda-flops', type=float, default=10.0,
-                    help='alpha (scale) for FLOPs loss term; for GFLOPs typical ~10 with beta=1')
-parser.add_argument('--beta', type=float, default=1.0,
-                    help='beta (power) for FLOPs loss term')
-
-# Rounds penalty (اختیاری)
-parser.add_argument('--eta', type=float, default=0.0, help='eta · Rounds penalty (0 to disable)')
-parser.add_argument('--rounds-agg', type=str, default='max', choices=['max','sum','mean'],
-                    help='Aggregation of per-layer rounds')
-parser.add_argument('--pe-capacity', type=int, default=50000, help='ops capacity per PE per round')
-parser.add_argument('--num-pe', type=int, default=20, help='number of PEs')
-parser.add_argument('--discrete-rounds', action='store_true',
-                    help='use ceil(no-grad) for rounds instead of soft/grad-friendly ratio')
-
-# Latency-only (برای سازگاری؛ استفاده نمی‌شود)
-parser.add_argument('--latency-file', type=str, default='rpi_speed.txt')
-parser.add_argument('--alpha', type=float, default=1e-2)
-args = parser.parse_args()
-
-# paths & logs
-args.model_save_path = os.path.join(config.model_save_path, args.tb_log)
-os.makedirs(args.model_save_path, exist_ok=True)
-_set_file(os.path.join(args.model_save_path, 'log.log'))
-
-# -------------------------
-# دقت شناور و بهینه‌سازی matmul
-# -------------------------
-torch.backends.cuda.matmul.allow_tf32 = (args.dtype in ['fp32','bf16'])
-torch.backends.cudnn.allow_tf32 = (args.dtype in ['fp32','bf16'])
-
-# -------------------------
-# دیتاست و دیتالودر
-# -------------------------
-CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
-CIFAR_STD  = [0.24703233, 0.24348505, 0.26158768]
-
-train_transform = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
-])
-
-train_data = dset.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
-
-train_queue = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-    num_workers=max(0, min(args.num_workers, 4)),
-    persistent_workers=True if args.num_workers > 0 else False,
-)
-
-val_queue = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=False, pin_memory=True,
-    num_workers=max(0, min(args.num_workers // 2, 2)),
-    persistent_workers=True if (args.num_workers // 2) > 0 else False,
-)
-
-# -------------------------
-# سازندهٔ FBNet (FLOPs-only)
-# -------------------------
-import supernet
-importlib.reload(supernet)
-print("Using supernet from:", supernet.__file__)
-
-FBNet = supernet.FBNet
-sig = inspect.signature(FBNet.__init__)
-params = set(sig.parameters.keys())
-
-blocks = get_blocks(cifar10=True)
-num_classes = config.num_cls_used if config.num_cls_used > 0 else 10
-
-common_kwargs = dict(
-    num_classes=num_classes,
-    blocks=blocks,
-    init_theta=config.init_theta,
-    dim_feature=1984,
-)
-
-assert 'flops_f' in params, "This supernet must support flops_f for FLOPs-only training."
-assert os.path.exists(args.flops_file), f"Missing LUT: {args.flops_file}"
-
-model = FBNet(**common_kwargs,
-              flops_f=args.flops_file,
-              flops_unit=args.flops_unit,
-              alpha=args.lambda_flops,
-              beta=args.beta,
-              # rounds (optional)
-              eta=args.eta,
-              rounds_agg=args.rounds_agg,
-              pe_capacity=args.pe_capacity,
-              num_pe=args.num_pe,
-              discrete_rounds=args.discrete_rounds)
-
-print(f">> Built FBNet (FLOPs-only). unit={args.flops_unit}, alpha={args.lambda_flops}, beta={args.beta}, "
-      f"eta={args.eta}, rounds_agg={args.rounds_agg}, PE={args.num_pe}×{args.pe_capacity}")
-
-# -------------------------
-# AmpTrainer: زیرکلاس Trainer با autocast/GradScaler
-# -------------------------
-from torch.cuda.amp import autocast, GradScaler
-
-class AmpTrainer(Trainer):
-    def __init__(self, *a, dtype='fp16', **kw):
-        super().__init__(*a, **kw)
-        self.dtype = dtype
-        self.autocast_dtype = None
-        if dtype == 'fp16':
-            self.autocast_dtype = torch.float16
-        elif dtype == 'bf16':
-            self.autocast_dtype = torch.bfloat16
-        # فقط برای fp16 scaler نیاز است
-        self.scaler = GradScaler(enabled=(dtype == 'fp16'))
-
-    def _maybe_autocast(self):
-        return autocast(dtype=self.autocast_dtype) if self.autocast_dtype else torch.cuda.amp.autocast(enabled=False)
-
-    def train_w(self, input, target, decay_temperature=False):
-        self.w_opt.zero_grad(set_to_none=True)
-        with self._maybe_autocast():
-            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
-        if self.scaler.is_enabled():
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.w_opt)
-            self.scaler.update()
-        else:
-            loss.backward()
-            self.w_opt.step()
-        if decay_temperature:
-            tmp = self.temp
-            self.temp *= self._tem_decay
-            self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-        return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
-
-    def train_t(self, input, target, decay_temperature=False):
-        self.t_opt.zero_grad(set_to_none=True)
-        with self._maybe_autocast():
-            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
-        if self.scaler.is_enabled():
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.t_opt)
-            self.scaler.update()
-        else:
-            loss.backward()
-            self.t_opt.step()
-        if decay_temperature:
-            tmp = self.temp
-            self.temp *= self._tem_decay
-            self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-        return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
-
-# -------------------------
-# ترینر و آموزش
-# -------------------------
-trainer = AmpTrainer(
-    network=model,
-    w_lr=config.w_lr, w_mom=config.w_mom, w_wd=config.w_wd,
-    t_lr=config.t_lr, t_wd=config.t_wd, t_beta=config.t_beta,
-    init_temperature=config.init_temperature, temperature_decay=config.temperature_decay,
-    logger=_logger, lr_scheduler={'T_max':400, 'logger':_logger, 'alpha':1e-4,
-                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98},
-    gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log,
-    dtype=args.dtype
-)
-
-trainer.search(
-    train_queue, val_queue,
-    total_epoch=config.total_epoch,
-    start_w_epoch=args.warmup,
-    log_frequence=args.log_frequence,
-)
-
-# -------------------------
-# خروجی معماری نهایی
-# -------------------------
-out_json = "./final_arch.json"
+# ====== DataParallel fallback: اگر data_parallel نبود، از torch.nn استفاده کن ======
 try:
-    trainer.export_final_architecture(out_json=out_json, print_table=True)
+  from data_parallel import DataParallel as _DP
 except Exception:
-    net = trainer._mod.module if hasattr(trainer._mod, "module") else trainer._mod
-    selected_ops = [int(torch.argmax(t.detach().cpu()).item()) for t in net.theta]
-    payload = {"selected_ops": selected_ops}
-    with open(out_json, "w") as f:
-        json.dump(payload, f, indent=2)
-    print("\n=== FBNet Final Architecture (fallback) ===")
-    for i, op in enumerate(selected_ops):
-        print(f"Layer {i:02d}: op={op}")
-    print(f"Saved final architecture → {out_json}")
+  from torch.nn import DataParallel as _DP
+# ================================================================================
+
+# ====== کمکی: خواندن LUT متنی و یکسان‌سازی طول سطرها ======
+def _load_txt_lut(path):
+  with open(path, 'r') as f:
+    lines = f.readlines()
+  lut = [[float(x) for x in line.strip().split()] for line in lines if line.strip()]
+  if not lut:
+    return []
+  max_len = max(len(r) for r in lut)
+  if max_len <= 0:
+    return lut
+  # میانگینِ ستون آخرِ سطرهای کامل برای پد کردن سطرهای کوتاه
+  full_tails = [r[max_len - 1] for r in lut if len(r) == max_len]
+  tail_mean = float(np.mean(full_tails)) if full_tails else 0.0
+  for r in lut:
+    if len(r) == max_len - 1:
+      r.append(tail_mean)
+  return lut
+# ================================================================================
+
+class MixedOp(nn.Module):
+  """Mixed operation.
+  Weighted sum of blocks.
+  """
+  def __init__(self, blocks):
+    super(MixedOp, self).__init__()
+    self._ops = nn.ModuleList()
+    for op in blocks:
+      self._ops.append(op)
+
+  def forward(self, x, weights):
+    tmp = []
+    for i, op in enumerate(self._ops):
+      r = op(x)
+      w = weights[..., i].reshape((-1, 1, 1, 1))
+      res = w * r
+      tmp.append(res)
+    return sum(tmp)
+
+class FBNet(nn.Module):
+
+  def __init__(self, num_classes, blocks,
+               init_theta=1.0,
+               # --------- (OLD) latency/energy inputs (غیرفعال) ----------
+               speed_f='./speed.txt',     # OLD: latency LUT path
+               energy_f='./energy.txt',   # OLD: energy  LUT path
+               alpha=0,                   # OLD: scale latency term
+               beta=0,                    # OLD: power latency term
+               gamma=0,                   # OLD: scale energy term
+               delta=0,                   # OLD: power energy term
+               # --------- (NEW) FLOPs & Rounds --------------------------
+               flops_f='./flops.txt',     # NEW: FLOPs LUT path (الزامی)
+               flops_unit='gflops',       # NEW: 'gflops' | 'mflops' | 'flops'
+               eta=0.0,                   # NEW: وزن پنالتی Rounds
+               rounds_agg='max',          # NEW: 'max' | 'sum' | 'mean'
+               pe_capacity=50000,         # NEW: ظرفیت هر PE (ops/round)
+               num_pe=20,                 # NEW: تعداد PE موازی
+               discrete_rounds=False,     # NEW: True→ ceil(no-grad), False→ نرم
+               dim_feature=1984):
+    super(FBNet, self).__init__()
+    init_func = lambda x: nn.init.constant_(x, init_theta)
+    
+    # --------- (OLD) نگه می‌داریم اما در لاس استفاده نمی‌کنیم ----------
+    self._alpha = alpha
+    self._beta  = beta
+    self._gamma = gamma
+    self._delta = delta
+    # ---------------------------------------------------------------
+
+    # ====== (NEW) تنظیمات FLOPs / Rounds ======
+    self._eta         = float(eta)
+    self._rounds_agg  = str(rounds_agg).lower()
+    self._pe_capacity = int(pe_capacity)
+    self._num_pe      = int(num_pe)
+    u = str(flops_unit).lower()
+    if   u in ('gflops','gops','giga'):
+      self._flops_scale = 1e9
+    elif u in ('mflops','mops','mega'):
+      self._flops_scale = 1e6
+    else:
+      self._flops_scale = 1.0
+    self._discrete_rounds = bool(discrete_rounds)
+    # ==========================================
+
+    self._criterion = nn.CrossEntropyLoss().cuda()
+
+    self.theta = []
+    self._ops = nn.ModuleList()
+    self._blocks = blocks
+
+    # --------- stem ----------
+    tmp = []
+    input_conv_count = 0
+    for b in blocks:
+      if isinstance(b, nn.Module):
+        tmp.append(b)
+        input_conv_count += 1
+      else:
+        break
+    self._input_conv = nn.Sequential(*tmp)
+    self._input_conv_count = input_conv_count
+
+    # --------- mixed ----------
+    for b in blocks:
+      if isinstance(b, list):
+        num_block = len(b)
+        theta = nn.Parameter(torch.ones((num_block, ), dtype=torch.float32, device='cuda'),
+                             requires_grad=True)
+        init_func(theta)
+        self.theta.append(theta)
+        self._ops.append(MixedOp(b))
+        input_conv_count += 1
+
+    # --------- head ----------
+    tmp = []
+    for b in blocks[input_conv_count:]:
+      if isinstance(b, nn.Module):
+        tmp.append(b)
+        input_conv_count += 1
+      else:
+        break
+    self._output_conv = nn.Sequential(*tmp)
+
+    # ================= (OLD) latency/energy خواندن و نرمال‌سازی (غیرفعال) =================
+    # with open(speed_f, 'r') as f:
+    #   _speed = f.readlines()
+    # self._speed = [[float(t) for t in s.strip().split(' ')] for s in _speed]
+    # max_len = max([len(s) for s in self._speed])
+    # iden_s = sum(s[max_len - 1] for s in self._speed if len(s) == max_len) / \
+    #          sum(1 for s in self._speed if len(s) == max_len)
+    # for i in range(len(self._speed)):
+    #   if len(self._speed[i]) == max_len - 1:
+    #     self._speed[i].append(iden_s)
+    # self._speed = torch.tensor(self._speed, requires_grad=False).cuda()
+
+    # with open(energy_f, 'r') as f:
+    #   _energy = f.readlines()
+    # self._energy = [[float(t) for t in s.strip().split(' ')] for s in _energy]
+    # max_len = max([len(s) for s in self._energy])
+    # iden_s = sum(s[max_len - 1] for s in self._energy if len(s) == max_len) / \
+    #          sum(1 for s in self._energy if len(s) == max_len)
+    # for i in range(len(self._energy)):
+    #   if len(self._energy[i]) == max_len - 1:
+    #     self._energy[i].append(iden_s)
+    # self._energy = torch.tensor(self._energy, requires_grad=False).cuda()
+    # ======================================================================================
+
+    # ================= (NEW) FLOPs LUT =================
+    assert flops_f and os.path.exists(flops_f), f"FLOPs LUT not found: {flops_f}"
+    self._flops = torch.tensor(_load_txt_lut(flops_f), requires_grad=False,
+                               dtype=torch.float32, device='cuda')
+    # ===================================================
+
+    self.classifier = nn.Linear(dim_feature, num_classes).cuda()
+
+  def forward(self, input, target, temperature=5.0, theta_list=None):
+    batch_size = input.size()[0]
+    self.batch_size = batch_size
+    data = self._input_conv(input)
+    theta_idx = 0
+
+    # (NEW) برای Rounds: میانگین FLOPs لایه‌ها (برحسب واحد LUT)
+    per_layer_flops_mean = []  # eg. GFLOPs per-sample per-layer
+
+    for l_idx in range(self._input_conv_count, len(self._blocks)):
+      block = self._blocks[l_idx]
+      if isinstance(block, list):
+        blk_len = len(block)
+        theta = self.theta[theta_idx] if theta_list is None else theta_list[theta_idx]
+        t = theta.repeat(batch_size, 1)
+        weight = F.gumbel_softmax(t, temperature)
+
+        # --------- (NEW) FLOPs expectation برای این لایه ----------
+        flops_row = self._flops[theta_idx][:blk_len]                      # [O]
+        flops_b   = weight * flops_row.unsqueeze(0).expand(batch_size, -1)# [B,O]
+        # مجموع روی batch → تقسیم بر batch برای per-sample mean
+        per_layer_flops_mean.append(torch.sum(flops_b) / batch_size)      # واحد LUT
+
+        # --------- MixedOp ----------
+        data = self._ops[theta_idx](data, weight)
+        theta_idx += 1
+      else:
+        break
+
+    data = self._output_conv(data)
+    data = F.avg_pool2d(data, data.size()[2:])
+    data = data.reshape((batch_size, -1))
+    logits = self.classifier(data)
+
+    # --- Cross-Entropy ---
+    self.ce = self._criterion(logits, target).sum()
+
+    # --- (NEW) Rounds penalty: از روی FLOPs و ظرفیت سخت‌افزار ---
+    total_capacity = float(self._pe_capacity * self._num_pe)  # ops در هر round
+    if len(per_layer_flops_mean) > 0 and total_capacity > 0:
+      rounds_per_layer = []
+      for l_flops in per_layer_flops_mean:
+        ops_layer = l_flops * self._flops_scale  # واحد: ops
+        ratio = ops_layer / total_capacity       # rounds پیوسته (قابل گرادیان)
+        if self._discrete_rounds:
+          rounds_layer = torch.ceil(ratio.detach())  # بدون گرادیان (پله‌ای)
+        else:
+          rounds_layer = ratio
+        rounds_per_layer.append(rounds_layer)
+      stack_r = torch.stack(rounds_per_layer)
+      if   self._rounds_agg == 'sum':
+        self.rounds_loss = stack_r.sum()
+      elif self._rounds_agg == 'mean':
+        self.rounds_loss = stack_r.mean()
+      else:  # 'max'
+        self.rounds_loss = stack_r.max()
+    else:
+      self.rounds_loss = torch.tensor(0.0, device=input.device)
+
+    # --- (OLD) latency / energy (غیرفعال) ---
+    # self.lat_loss = lat / batch_size
+    # self.ener_loss = ener / batch_size
+
+    # --- (NEW) برای سازگاری با Trainer: lat_loss = Rounds, ener_loss = 0 ---
+    self.lat_loss  = self.rounds_loss
+    self.ener_loss = torch.tensor(0.0, device=input.device)
+
+    # --- (NEW) Loss نهایی: CE + η · Rounds ---
+    self.loss = self.ce + self._eta * self.rounds_loss
+
+    # --- accuracy ---
+    pred = torch.argmax(logits, dim=1)
+    self.acc = torch.sum(pred == target).float() / batch_size
+    return self.loss, self.ce, self.lat_loss, self.acc, self.ener_loss
+
+class Trainer(object):
+  """Training network parameters and theta separately.  (Rounds-aware)"""
+  def __init__(self, network,
+               w_lr=0.01,
+               w_mom=0.9,
+               w_wd=1e-4,
+               t_lr=0.001,
+               t_wd=3e-3,
+               t_beta=(0.5, 0.999),
+               init_temperature=5.0,
+               temperature_decay=0.965,
+               logger=logging,
+               lr_scheduler={'T_max' : 200},
+               gpus=[0],
+               save_theta_prefix='',
+               save_tb_log=''):
+    assert isinstance(network, FBNet)
+    network.apply(weights_init)
+    network = network.train().cuda()
+    if isinstance(gpus, str):
+      gpus = [int(i) for i in gpus.strip().split(',')]
+    network = _DP(network, device_ids=gpus)   # ← fallback-safe DP
+    self.gpus = gpus
+    self._mod = network
+    # >>> اگر DataParallel است، theta را از module بگیر:
+    self.theta = network.module.theta if hasattr(network, "module") else network.theta
+    self.w = network.parameters()
+    self._tem_decay = temperature_decay
+    self.temp = init_temperature
+    self.logger = logger
+    self.tensorboard = Tensorboard('logs/'+(save_tb_log if save_tb_log else 'default_log'))
+    self.save_theta_prefix = save_theta_prefix
+
+    self._acc_avg = AvgrageMeter('acc')
+    self._ce_avg  = AvgrageMeter('ce')
+    self._lat_avg = AvgrageMeter('rounds')  # ← الان rounds را لاگ می‌کنیم
+    self._loss_avg= AvgrageMeter('loss')
+    self._ener_avg= AvgrageMeter('ener')
+
+    self.w_opt = torch.optim.SGD(self.w, w_lr, momentum=w_mom, weight_decay=w_wd)
+    self.w_sche = CosineDecayLR(self.w_opt, **lr_scheduler)
+    self.t_opt = torch.optim.Adam(self.theta, lr=t_lr, betas=t_beta, weight_decay=t_wd)
+
+  def train_w(self, input, target, decay_temperature=False):
+    self.w_opt.zero_grad()
+    loss, ce, lat, acc, ener = self._mod(input, target, self.temp)  # lat = rounds
+    loss.backward()
+    self.w_opt.step()
+    if decay_temperature:
+      tmp = self.temp
+      self.temp *= self._tem_decay
+      self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
+    return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
+  
+  def train_t(self, input, target, decay_temperature=False):
+    self.t_opt.zero_grad()
+    loss, ce, lat, acc, ener = self._mod(input, target, self.temp)  # lat = rounds
+    loss.backward()
+    self.t_opt.step()
+    if decay_temperature:
+      tmp = self.temp
+      self.temp *= self._tem_decay
+      self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
+    return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
+  
+  def decay_temperature(self, decay_ratio=None):
+    tmp = self.temp
+    if decay_ratio is None:
+      self.temp *= self._tem_decay
+    else:
+      self.temp *= decay_ratio
+    self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
+  
+  def _step(self, input, target, epoch, step, log_frequence, func):
+    input = input.cuda()
+    target = target.cuda()
+    loss, ce, lat, acc ,ener= func(input, target)   # lat = rounds
+
+    # batch_size امن با DP
+    try:
+      batch_size = self._mod.module.batch_size
+    except AttributeError:
+      batch_size = self._mod.batch_size
+
+    self._acc_avg.update(acc)
+    self._ce_avg.update(ce)
+    self._lat_avg.update(lat)
+    self._loss_avg.update(loss)
+    self._ener_avg.update(ener)
+
+    if step > 1 and (step % log_frequence == 0):
+      self.toc = time.time()
+      speed = 1.0 * (batch_size * log_frequence) / (self.toc - self.tic)
+      self.tensorboard.log_scalar('Total Loss', self._loss_avg.getValue(), step)
+      self.tensorboard.log_scalar('Accuracy', self._acc_avg.getValue(), step)
+      self.tensorboard.log_scalar('Rounds',   self._lat_avg.getValue(), step)
+      self.logger.info("Epoch[%d] Batch[%d] Speed: %.6f samples/sec %s %s %s %s %s" 
+              % (epoch, step, speed, self._loss_avg, 
+                 self._acc_avg, self._ce_avg, self._lat_avg, self._ener_avg))
+      # reset
+      for avg in [self._loss_avg, self._acc_avg, self._ce_avg, self._lat_avg, self._ener_avg]:
+        avg.reset()
+      self.tic = time.time()
+  
+  def search(self, train_w_ds, train_t_ds, total_epoch=90, start_w_epoch=10, log_frequence=100):
+    assert start_w_epoch >= 1, "Start to train w"
+    self.tic = time.time()
+    for epoch in range(start_w_epoch):
+      self.logger.info("Start to train w for epoch %d" % epoch)
+      for step, (input, target) in enumerate(train_w_ds):
+        self._step(input, target, epoch, step, log_frequence,
+                   lambda x, y: self.train_w(x, y, False))
+        self.w_sche.step()
+        self.tensorboard.log_scalar('Learning rate curve',
+                                    self.w_sche.last_epoch, self.w_opt.param_groups[0]['lr'])
+
+    self.tic = time.time()
+    for epoch in range(total_epoch):
+      self.logger.info("Start to train theta for epoch %d" % (epoch+start_w_epoch))
+      for step, (input, target) in enumerate(train_t_ds):
+        self._step(input, target, epoch + start_w_epoch, step, log_frequence,
+                   lambda x, y: self.train_t(x, y, False))
+        self.save_theta('./theta-result/%s_theta_epoch_%d.txt' % 
+                    (self.save_theta_prefix, epoch+start_w_epoch), epoch)
+      self.decay_temperature()
+      self.logger.info("Start to train w for epoch %d" % (epoch+start_w_epoch))
+      for step, (input, target) in enumerate(train_w_ds):
+        self._step(input, target, epoch + start_w_epoch, step, log_frequence,
+                   lambda x, y: self.train_w(x, y, False))
+        self.w_sche.step()
+    self.tensorboard.close()
+
+  def save_theta(self, save_path='theta.txt',epoch=0):
+    """Save theta + heatmap."""
+    res = []
+    import os
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, 'w') as f:
+      for i,t in enumerate(self.theta):
+        t_list = list(t.detach().cpu().numpy())
+        if(len(t_list) < 9): t_list.append(0.00)  # هم‌ترازسازی اختیاری
+        max_index = t_list.index(max(t_list))
+        self.tensorboard.log_scalar('Layer %s'% str(i),max_index+1, epoch)
+        res.append(t_list)
+        s = ' '.join([str(tmp) for tmp in t_list])
+        f.write(s + '\n')
+
+      val = np.array(res)
+      ax = sns.heatmap(val,cbar=True,annot=True)
+      ax.figure.savefig(save_path[:-3]+'png')
+      plt.close()
+    return res
