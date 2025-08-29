@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from torch.nn import DataParallel
-from utils import AvgrageMeter, weights_init, CosineDecayLR, Tensorboard
+from utils import AvgrageMeter, weights_init, CosineDecayLR   # ← Tensorboard را همین‌جا ایمپورت نمی‌کنیم
 
 # -------------------------
 # کمکی: خواندن LUT متنی (space-separated)
@@ -79,7 +79,7 @@ class FBNet(nn.Module):
                  flops_unit='gflops',       # 'gflops' | 'mflops' | 'flops'
                  discrete_rounds=False,     # اگر True → ceil و بدون گرادیان
                  # ---------- سایر ----------
-                 criterion=nn.CrossEntropyLoss().cuda(),
+                 criterion=None,
                  dim_feature=1984):
         super(FBNet, self).__init__()
 
@@ -91,7 +91,7 @@ class FBNet(nn.Module):
         self._eta   = float(eta)
 
         # تنظیمات rounds
-        self._rounds_agg      = rounds_agg
+        self._rounds_agg      = str(rounds_agg).lower()
         self._pe_capacity     = int(pe_capacity)
         self._num_pe          = int(num_pe)
         self._flops_unit      = str(flops_unit).lower()
@@ -103,7 +103,7 @@ class FBNet(nn.Module):
         else:
             self._flops_scale = 1.0
 
-        self._criterion = criterion.cuda()
+        self._criterion = (criterion or nn.CrossEntropyLoss()).cuda()
         self._blocks = blocks
 
         # θ برای لایه‌های Mixed
@@ -167,7 +167,6 @@ class FBNet(nn.Module):
 
         # مجموع‌های لایه‌ای
         flops_acc = []      # انتظار FLOPs (به ازای batch)
-        # latency/energy را نگاه نمی‌داریم
 
         for l_idx in range(self._input_conv_count, len(self._blocks)):
             block = self._blocks[l_idx]
@@ -179,7 +178,7 @@ class FBNet(nn.Module):
             w = F.gumbel_softmax(theta.repeat(batch_size, 1), temperature)  # [B, O]
 
             # FLOPs term
-            flops_row = self._flops[theta_idx][:blk_len]  # [O]
+            flops_row = self._flops[theta_idx][:blk_len]  # [O] (واحد LUT: معمولاً GFLOPs)
             flops_b = w * flops_row.unsqueeze(0).expand(batch_size, -1)  # [B, O]
             flops_acc.append(torch.sum(flops_b))  # مجموع روی batch
 
@@ -196,16 +195,14 @@ class FBNet(nn.Module):
         # Cross-Entropy
         self.ce = self._criterion(logits, target).sum()
 
-        # === FLOPs-only term ===
+        # === FLOPs-only (lat_loss = GFLOPs per sample) ===
         if len(flops_acc) > 0:
-            # هر عضو flops_acc[i] جمع انتظار FLOPs روی batch است → میانگین per-sample:
             per_layer_mean = [fa / batch_size for fa in flops_acc]       # لیست GFLOPs
             flops_per_sample = torch.stack(per_layer_mean).sum()         # GFLOPs/نمونه
         else:
             flops_per_sample = torch.tensor(0.0, device=input.device)
 
-        # به‌خاطر سازگاری با ترینر قدیمی، lat_loss را = FLOPs می‌گذاریم
-        self.lat_loss  = flops_per_sample
+        self.lat_loss  = flops_per_sample           # برای سازگاری با ترینر
         self.ener_loss = torch.tensor(0.0, device=input.device)
 
         # === Rounds term (Topology usage) ===
@@ -213,7 +210,8 @@ class FBNet(nn.Module):
         rounds_list = []
         if len(flops_acc) > 0 and total_capacity > 0:
             for l_flops in per_layer_mean:                         # GFLOPs لایه‌ای/نمونه
-                ops_layer = l_flops * self._flops_scale            # ← تعداد عملیات
+                ops_layer = l_flops * (1e9 if self._flops_unit in ('gflops','gops','giga') else
+                                       1e6 if self._flops_unit in ('mflops','mops','mega') else 1.0)
                 ratio = ops_layer / total_capacity                 # rounds پیوسته
                 if self._discrete_rounds:
                     rounds_layer = torch.ceil(ratio.detach())      # بدون گرادیان
@@ -243,7 +241,7 @@ class FBNet(nn.Module):
 
 
 class Trainer(object):
-    """Training network parameters and theta separately. (FLOPs-only friendly)"""
+    """Training network parameters and theta separately. (FLOPs-only + Rounds)"""
     def __init__(self, network,
                  w_lr=0.01, w_mom=0.9, w_wd=1e-4,
                  t_lr=0.001, t_wd=3e-3, t_beta=(0.5, 0.999),
@@ -257,7 +255,7 @@ class Trainer(object):
         network.apply(weights_init)
         network = network.train().cuda()
 
-        # DataParallel رسمی
+        # DataParallel
         if isinstance(gpus, str):
             gpus = [int(i) for i in gpus.strip().split(',')]
         network = DataParallel(network, device_ids=gpus)
@@ -269,12 +267,23 @@ class Trainer(object):
         self._tem_decay = temperature_decay
         self.temp = init_temperature
         self.logger = logger
-        self.tensorboard = Tensorboard('logs/' + (save_tb_log if save_tb_log else 'default_log'))
+
+        # TensorBoard امن با fallback بدون TensorFlow
+        try:
+            from utils import Tensorboard as _Tensorboard
+            self.tensorboard = _Tensorboard('logs/' + (save_tb_log if save_tb_log else 'default_log'))
+        except Exception as e:
+            self.logger.warning(f"TensorBoard disabled (reason: {e}). Using No-Op logger.")
+            class _NoTB:
+                def log_scalar(self, *a, **k): pass
+                def close(self): pass
+            self.tensorboard = _NoTB()
+
         self.save_theta_prefix = save_theta_prefix
 
         self._acc_avg  = AvgrageMeter('acc')
         self._ce_avg   = AvgrageMeter('ce')
-        self._lat_avg  = AvgrageMeter('flops')  # برچسب FLOPs
+        self._lat_avg  = AvgrageMeter('flops')
         self._loss_avg = AvgrageMeter('loss')
         self._ener_avg = AvgrageMeter('ener')
 
@@ -331,7 +340,7 @@ class Trainer(object):
             speed = (batch_size * log_frequence) / (self.toc - self.tic)
             self.tensorboard.log_scalar('Total Loss', self._loss_avg.getValue(), step)
             self.tensorboard.log_scalar('Accuracy',   self._acc_avg.getValue(), step)
-            self.tensorboard.log_scalar('FLOPs',      self._lat_avg.getValue(), step)  # rename
+            self.tensorboard.log_scalar('FLOPs',      self._lat_avg.getValue(), step)
             # اختیاری: rounds را هم لاگ کن اگر موجود بود
             try:
                 rounds_val = (self._mod.module.rounds_loss
