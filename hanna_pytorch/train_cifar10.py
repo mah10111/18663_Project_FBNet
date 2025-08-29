@@ -71,7 +71,7 @@ class FBNet(nn.Module):
                # --------- (NEW) FLOPs & Rounds --------------------------
                flops_f='./flops.txt',     # NEW: FLOPs LUT path (الزامی)
                flops_unit='gflops',       # NEW: 'gflops' | 'mflops' | 'flops'
-               eta=0.0,                   # NEW: وزن پنالتی Rounds
+               eta=1e-2,                   # NEW: وزن پنالتی Rounds
                rounds_agg='max',          # NEW: 'max' | 'sum' | 'mean'
                pe_capacity=50000,         # NEW: ظرفیت هر PE (ops/round)
                num_pe=20,                 # NEW: تعداد PE موازی
