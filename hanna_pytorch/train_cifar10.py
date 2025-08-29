@@ -1,3 +1,6 @@
+# supernet.py  — FLOPs→Rounds loss (lat/energy kept but commented)
+
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,7 +64,7 @@ class FBNet(nn.Module):
 
   def __init__(self, num_classes, blocks,
                init_theta=1.0,
-               # --------- (OLD) latency/energy inputs (غیرفعال) ----------
+               # --------- (OLD) latency/energy inputs (غیرفعال در لا‌سِ جدید) ----------
                speed_f='./speed.txt',     # OLD: latency LUT path
                energy_f='./energy.txt',   # OLD: energy  LUT path
                alpha=0,                   # OLD: scale latency term
@@ -69,9 +72,9 @@ class FBNet(nn.Module):
                gamma=0,                   # OLD: scale energy term
                delta=0,                   # OLD: power energy term
                # --------- (NEW) FLOPs & Rounds --------------------------
-               flops_f='./flops.txt',     # NEW: FLOPs LUT path (الزامی)
+               flops_f='./flops.txt',     # NEW: FLOPs LUT path (اجباری برای rounds)
                flops_unit='gflops',       # NEW: 'gflops' | 'mflops' | 'flops'
-               eta=1e-2,                   # NEW: وزن پنالتی Rounds
+               eta=1e-2,                  # NEW: وزن پنالتی Rounds
                rounds_agg='max',          # NEW: 'max' | 'sum' | 'mean'
                pe_capacity=50000,         # NEW: ظرفیت هر PE (ops/round)
                num_pe=20,                 # NEW: تعداد PE موازی
@@ -80,7 +83,7 @@ class FBNet(nn.Module):
     super(FBNet, self).__init__()
     init_func = lambda x: nn.init.constant_(x, init_theta)
     
-    # --------- (OLD) نگه می‌داریم اما در لاس استفاده نمی‌کنیم ----------
+    # --------- (OLD) نگه می‌داریم اما در لا‌س استفاده نمی‌کنیم ----------
     self._alpha = alpha
     self._beta  = beta
     self._gamma = gamma
