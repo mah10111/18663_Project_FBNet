@@ -9,7 +9,7 @@ from termcolor import colored
 from datetime import datetime
 import shutil
 import math
-import tensorflow as tf
+#import tensorflow as tf
 
 import torch
 from torch.optim.lr_scheduler import _LRScheduler
