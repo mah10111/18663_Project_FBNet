@@ -1,4 +1,4 @@
-wo# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
+# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
 
 import os, sys, time, logging, argparse, json, importlib, inspect
 import numpy as np
