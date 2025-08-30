@@ -211,7 +211,7 @@ trainer = AmpTrainer(
     t_lr=config.t_lr, t_wd=config.t_wd, t_beta=config.t_beta,
     init_temperature=config.init_temperature, temperature_decay=config.temperature_decay,
     logger=_logger, lr_scheduler={'T_max':400, 'logger':_logger, 'alpha':1e-4,
-                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98,'eta=0.05'},
+                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98,'eta0':05},
     gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log,
     dtype=args.dtype
 )
