@@ -1,4 +1,4 @@
-# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
+wo# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
 
 import os, sys, time, logging, argparse, json, importlib, inspect
 import numpy as np
@@ -44,7 +44,9 @@ parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
-
+parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
+# ... بقیه آرگومان‌ها
+parser.add_argument('--eta', type=float, default=0.0, help='Scaling factor for rounds penalty')
 # دقت شناور
 parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
                     help='Numerics for AMP: fp32 (off), fp16, or bf16')
