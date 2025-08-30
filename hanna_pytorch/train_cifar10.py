@@ -30,6 +30,7 @@ class Config(object):
     model_save_path = './term_output'
     total_epoch = 10
     start_w_epoch = 2
+    eta=0.05
 
 config = Config()
 logging.basicConfig(level=logging.INFO)
@@ -131,7 +132,8 @@ if 'flops_f' in params:   # نسخهٔ FLOPs-only
     model = FBNet(**common_kwargs,
                   flops_f=args.flops_file,
                   alpha=args.lambda_flops,
-                  beta=args.beta)
+                  beta=args.beta,
+                 eta=args.eta)
     print(">> Built FBNet (FLOPs-only).")
 
 elif 'speed_f' in params: # نسخهٔ latency-only
@@ -142,7 +144,7 @@ elif 'speed_f' in params: # نسخهٔ latency-only
     print(">> Built FBNet (latency-only).")
 
 else:                      # کمینه
-    model = FBNet(**common_kwargs)
+    model = FBNet(**common_kwargs.eta=args.eta)
     print(">> Built FBNet (minimal).")
 
 # -------------------------
@@ -209,7 +211,7 @@ trainer = AmpTrainer(
     t_lr=config.t_lr, t_wd=config.t_wd, t_beta=config.t_beta,
     init_temperature=config.init_temperature, temperature_decay=config.temperature_decay,
     logger=_logger, lr_scheduler={'T_max':400, 'logger':_logger, 'alpha':1e-4,
-                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98},
+                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98,'eta=0.05'},
     gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log,
     dtype=args.dtype
 )
