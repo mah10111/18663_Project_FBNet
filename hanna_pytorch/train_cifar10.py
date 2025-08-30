@@ -144,7 +144,7 @@ elif 'speed_f' in params: # نسخهٔ latency-only
     print(">> Built FBNet (latency-only).")
 
 else:                      # کمینه
-    model = FBNet(**common_kwargs.eta=args.eta)
+    model = FBNet(**common_kwargs,eta=args.eta)
     print(">> Built FBNet (minimal).")
 
 # -------------------------
