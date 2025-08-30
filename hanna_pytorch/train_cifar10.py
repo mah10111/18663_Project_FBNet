@@ -45,7 +45,7 @@ parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
-parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
+
 # ... بقیه آرگومان‌ها
 parser.add_argument('--eta', type=float, default=0.0, help='Scaling factor for rounds penalty')
 # دقت شناور
