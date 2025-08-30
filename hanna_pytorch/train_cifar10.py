@@ -138,7 +138,7 @@ elif 'speed_f' in params: # نسخهٔ latency-only
     assert os.path.exists(args.latency_file), f"Missing LUT: {args.latency_file}"
     model = FBNet(**common_kwargs,
                   speed_f=args.latency_file,
-                  alpha=args.alpha, beta=args.beta, gamma=0.0, delta=0.0)
+                  alpha=args.alpha, beta=args.beta, gamma=0.0, delta=0.0,eta=args.eta)
     print(">> Built FBNet (latency-only).")
 
 else:                      # کمینه
