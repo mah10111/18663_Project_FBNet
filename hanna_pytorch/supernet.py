@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import inspect  # ← for adapting CosineDecayLR kwargs
 
 # NOTE: این‌ها باید در utils موجود باشند
 from utils import (
@@ -314,41 +315,65 @@ class Trainer(object):
         self.save_theta_prefix = save_theta_prefix
 
         self._acc_avg = AvgrageMeter('acc')
-        self._ce_avg  = AvgrageMeter('ce')
+               self._ce_avg  = AvgrageMeter('ce')
         self._lat_avg = AvgrageMeter('lat')
         self._loss_avg= AvgrageMeter('loss')
         self._ener_avg= AvgrageMeter('ener')
 
         self.w_opt = torch.optim.SGD(self.w, lr=w_lr, momentum=w_mom, weight_decay=w_wd)
 
-        # --- Normalize LR scheduler kwargs to match CosineDecayLR signature ---
-        # Expected (most common): T_max, eta_min (and optionally last_epoch)
+        # --- Normalize & adapt LR scheduler kwargs to actual CosineDecayLR signature ---
         if not isinstance(lr_scheduler, dict):
             lr_scheduler = {}
 
         sched_kwargs = {}
-        # map T_max
+        # Map T_max (accept T_max / t_max, default 200)
         if 'T_max' in lr_scheduler:
             sched_kwargs['T_max'] = lr_scheduler['T_max']
         elif 't_max' in lr_scheduler:
             sched_kwargs['T_max'] = lr_scheduler['t_max']
         else:
-            sched_kwargs['T_max'] = 200  # default fallback
+            sched_kwargs['T_max'] = 200
 
-        # map eta_min (accept aliases: eta0, lr_min, min_lr)
+        # Collect eta-min style value if provided under various names
+        eta_val = None
         if 'eta_min' in lr_scheduler:
-            sched_kwargs['eta_min'] = lr_scheduler['eta_min']
+            eta_val = lr_scheduler['eta_min']
         elif 'eta0' in lr_scheduler:
-            sched_kwargs['eta_min'] = lr_scheduler['eta0']
+            eta_val = lr_scheduler['eta0']
         elif 'lr_min' in lr_scheduler:
-            sched_kwargs['eta_min'] = lr_scheduler['lr_min']
+            eta_val = lr_scheduler['lr_min']
         elif 'min_lr' in lr_scheduler:
-            sched_kwargs['eta_min'] = lr_scheduler['min_lr']
+            eta_val = lr_scheduler['min_lr']
 
-        # last_epoch (optional)
+        # Optional last_epoch passthrough
         if 'last_epoch' in lr_scheduler:
             sched_kwargs['last_epoch'] = lr_scheduler['last_epoch']
 
+        # Read actual __init__ signature of CosineDecayLR
+        sig = inspect.signature(CosineDecayLR.__init__)
+        accepted = set(sig.parameters.keys()) - {'self'}
+
+        # Place T_max under alternative name if needed
+        if 'T_max' not in accepted and 't_max' in accepted and 'T_max' in sched_kwargs:
+            sched_kwargs['t_max'] = sched_kwargs.pop('T_max')
+
+        # Place eta under whatever name the scheduler expects
+        if eta_val is not None:
+            if 'eta_min' in accepted:
+                sched_kwargs['eta_min'] = eta_val
+            elif 'lr_min' in accepted:
+                sched_kwargs['lr_min'] = eta_val
+            elif 'eta0' in accepted:
+                sched_kwargs['eta0'] = eta_val
+            # else: scheduler has no min-lr parameter → skip
+
+        # Drop any unknown kwargs to avoid TypeError
+        for k in list(sched_kwargs.keys()):
+            if k not in accepted:
+                sched_kwargs.pop(k, None)
+
+        # Build the scheduler safely
         self.w_sche = CosineDecayLR(self.w_opt, **sched_kwargs)
 
         self.t_opt = torch.optim.Adam(self.theta, lr=t_lr, betas=t_beta, weight_decay=t_wd)
