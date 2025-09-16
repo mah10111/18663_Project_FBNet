@@ -60,6 +60,18 @@ def _pad_last_column_to_same_length(mat):
     return mat
 
 
+def _to_const_tensor(x):
+    """
+    Safely create a non-trainable tensor from list/ndarray/tensor
+    without triggering 'copy construct from a tensor' warnings.
+    """
+    if isinstance(x, torch.Tensor):
+        t = x.detach().clone()
+    else:
+        t = torch.as_tensor(x)
+    return t.requires_grad_(False)
+
+
 # =========================
 # Mixed operation container
 # =========================
@@ -153,11 +165,11 @@ class FBNet(nn.Module):
         if speed_mat is None and energy_mat is not None:
             speed_mat = [[0.0] * len(r) for r in energy_mat]
 
-        self._speed  = torch.tensor(speed_mat,  requires_grad=False) if speed_mat  is not None else None
-        self._energy = torch.tensor(energy_mat, requires_grad=False) if energy_mat is not None else None
+        self._speed  = _to_const_tensor(speed_mat)   if speed_mat  is not None else None
+        self._energy = _to_const_tensor(energy_mat)  if energy_mat is not None else None
 
         fl = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
-        self._flops = torch.tensor(fl, requires_grad=False) if fl is not None else None
+        self._flops = _to_const_tensor(fl) if fl is not None else None
 
         # classifier head
         self.classifier = nn.Linear(dim_feature, num_classes)
@@ -308,7 +320,36 @@ class Trainer(object):
         self._ener_avg= AvgrageMeter('ener')
 
         self.w_opt = torch.optim.SGD(self.w, lr=w_lr, momentum=w_mom, weight_decay=w_wd)
-        self.w_sche = CosineDecayLR(self.w_opt, **lr_scheduler)
+
+        # --- Normalize LR scheduler kwargs to match CosineDecayLR signature ---
+        # Expected (most common): T_max, eta_min (and optionally last_epoch)
+        if not isinstance(lr_scheduler, dict):
+            lr_scheduler = {}
+
+        sched_kwargs = {}
+        # map T_max
+        if 'T_max' in lr_scheduler:
+            sched_kwargs['T_max'] = lr_scheduler['T_max']
+        elif 't_max' in lr_scheduler:
+            sched_kwargs['T_max'] = lr_scheduler['t_max']
+        else:
+            sched_kwargs['T_max'] = 200  # default fallback
+
+        # map eta_min (accept aliases: eta0, lr_min, min_lr)
+        if 'eta_min' in lr_scheduler:
+            sched_kwargs['eta_min'] = lr_scheduler['eta_min']
+        elif 'eta0' in lr_scheduler:
+            sched_kwargs['eta_min'] = lr_scheduler['eta0']
+        elif 'lr_min' in lr_scheduler:
+            sched_kwargs['eta_min'] = lr_scheduler['lr_min']
+        elif 'min_lr' in lr_scheduler:
+            sched_kwargs['eta_min'] = lr_scheduler['min_lr']
+
+        # last_epoch (optional)
+        if 'last_epoch' in lr_scheduler:
+            sched_kwargs['last_epoch'] = lr_scheduler['last_epoch']
+
+        self.w_sche = CosineDecayLR(self.w_opt, **sched_kwargs)
 
         self.t_opt = torch.optim.Adam(self.theta, lr=t_lr, betas=t_beta, weight_decay=t_wd)
 
