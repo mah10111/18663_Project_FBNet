@@ -315,7 +315,7 @@ class Trainer(object):
         self.save_theta_prefix = save_theta_prefix
 
         self._acc_avg = AvgrageMeter('acc')
-               self._ce_avg  = AvgrageMeter('ce')
+        self._ce_avg  = AvgrageMeter('ce')
         self._lat_avg = AvgrageMeter('lat')
         self._loss_avg= AvgrageMeter('loss')
         self._ener_avg= AvgrageMeter('ener')
