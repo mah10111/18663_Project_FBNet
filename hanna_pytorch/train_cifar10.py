@@ -1,4 +1,4 @@
-# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + FLOPs/Latency auto-build
+# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + انتخاب صریح FLOPs یا Latency
 
 import os, sys, time, logging, argparse, json, importlib, inspect
 import numpy as np
@@ -30,7 +30,6 @@ class Config(object):
     model_save_path = './term_output'
     total_epoch = 10
     start_w_epoch = 2
-    eta=0.05
 
 config = Config()
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +38,8 @@ logging.basicConfig(level=logging.INFO)
 # آرگومان‌ها
 # -------------------------
 parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
+
+# اجرای کلی
 parser.add_argument('--batch-size', type=int, default=256)
 parser.add_argument('--log-frequence', type=int, default=100)
 parser.add_argument('--gpus', type=str, default='0')
@@ -46,23 +47,30 @@ parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
 
-# ... بقیه آرگومان‌ها
+# انتخاب معیار هزینه
+parser.add_argument('--cost-mode', choices=['flops','latency'], default='flops',
+                    help='انتخاب معیار هزینه: فقط flops یا فقط latency(+energy)')
+
+# پنالتی تعداد روندها (rounds)
 parser.add_argument('--eta', type=float, default=0.0, help='Scaling factor for rounds penalty')
+
 # دقت شناور
 parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
                     help='Numerics for AMP: fp32 (off), fp16, or bf16')
 
-# FLOPs-only (اگر نسخهٔ supernet از flops_f پشتیبانی کند)
+# FLOPs
 parser.add_argument('--flops-file', type=str, default='flops.txt',
                     help='FLOPs LUT (per layer, per op)')
 parser.add_argument('--lambda-flops', type=float, default=1e-2,
                     help='scale for FLOPs loss term (alpha)')
 parser.add_argument('--beta', type=float, default=1.0,
-                    help='power for FLOPs loss term (beta)')
+                    help='power for cost term (beta) — هم برای FLOPs و هم Latency استفاده می‌شود')
 
-# Latency-only (اگر نسخهٔ supernet از speed_f پشتیبانی کند)
+# Latency/Energy
 parser.add_argument('--latency-file', type=str, default='rpi_speed.txt',
                     help='Latency LUT (per layer, per op)')
+parser.add_argument('--energy-file', type=str, default=None,
+                    help='Energy LUT (اختیاری). اگر خالی باشد، انرژی صفر فرض می‌شود.')
 parser.add_argument('--alpha', type=float, default=1e-2,
                     help='scale for latency loss term (alpha)')
 
@@ -107,7 +115,7 @@ val_queue = torch.utils.data.DataLoader(
 )
 
 # -------------------------
-# سازندهٔ داینامیک FBNet (FLOPs یا latency)
+# سازندهٔ داینامیک FBNet (با انتخاب صریح هزینه)
 # -------------------------
 import supernet
 importlib.reload(supernet)
@@ -120,32 +128,47 @@ params = set(sig.parameters.keys())
 blocks = get_blocks(cifar10=True)
 num_classes = config.num_cls_used if config.num_cls_used > 0 else 10
 
+def resolve_here(p):
+    if not p: return p
+    return p if os.path.isabs(p) else os.path.join(here, p)
+
+flops_path   = resolve_here(args.flops_file)
+latency_path = resolve_here(args.latency_file)
+energy_path  = resolve_here(args.energy_file) if args.energy_file else None
+
+print(f"[PATH] cwd={os.getcwd()}")
+print(f"[PATH] flops_file   = {flops_path}   exists={os.path.exists(flops_path)}")
+print(f"[PATH] latency_file = {latency_path} exists={os.path.exists(latency_path)}")
+print(f"[PATH] energy_file  = {energy_path}  exists={os.path.exists(energy_path) if energy_path else 'n/a'}")
+
 common_kwargs = dict(
     num_classes=num_classes,
     blocks=blocks,
     init_theta=config.init_theta,
     dim_feature=1984,
+    eta=args.eta,
 )
 
-if 'flops_f' in params:   # نسخهٔ FLOPs-only
-    assert os.path.exists(args.flops_file), f"Missing LUT: {args.flops_file}"
+if args.cost_mode == 'flops':
+    assert 'flops_f' in params, "این نسخهٔ FBNet از flops_f پشتیبانی نمی‌کند."
+    assert os.path.exists(flops_path), f"Missing FLOPs LUT: {flops_path}"
     model = FBNet(**common_kwargs,
-                  flops_f=args.flops_file,
-                  alpha=args.lambda_flops,
-                  beta=args.beta,
-                 eta=args.eta)
+                  flops_f=flops_path,
+                  alpha=args.lambda_flops,  # وزن FLOPs
+                  beta=args.beta)
     print(">> Built FBNet (FLOPs-only).")
 
-elif 'speed_f' in params: # نسخهٔ latency-only
-    assert os.path.exists(args.latency_file), f"Missing LUT: {args.latency_file}"
+elif args.cost_mode == 'latency':
+    assert 'speed_f' in params, "این نسخهٔ FBNet از speed_f پشتیبانی نمی‌کند."
+    assert os.path.exists(latency_path), f"Missing latency LUT: {latency_path}"
+    # Energy اختیاری است؛ اگر مسیرش نباشد FBNet آن را صفر می‌گیرد.
     model = FBNet(**common_kwargs,
-                  speed_f=args.latency_file,
-                  alpha=args.alpha, beta=args.beta, gamma=0.0, delta=0.0,eta=args.eta)
+                  speed_f=latency_path,
+                  energy_f=energy_path if (energy_path and os.path.exists(energy_path)) else None,
+                  alpha=args.alpha,  # وزن Latency
+                  beta=args.beta,
+                  gamma=0.0, delta=0.0)
     print(">> Built FBNet (latency-only).")
-
-else:                      # کمینه
-    model = FBNet(**common_kwargs,eta=args.eta)
-    print(">> Built FBNet (minimal).")
 
 # -------------------------
 # AmpTrainer: زیرکلاس Trainer با autocast/GradScaler
@@ -161,7 +184,6 @@ class AmpTrainer(Trainer):
             self.autocast_dtype = torch.float16
         elif dtype == 'bf16':
             self.autocast_dtype = torch.bfloat16
-        # فقط برای fp16 scaler نیاز است
         self.scaler = GradScaler(enabled=(dtype == 'fp16'))
 
     def _maybe_autocast(self):
@@ -169,7 +191,6 @@ class AmpTrainer(Trainer):
 
     def train_w(self, input, target, decay_temperature=False):
         self.w_opt.zero_grad(set_to_none=True)
-        # با AMP
         with self._maybe_autocast():
             loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
         if self.scaler.is_enabled():
@@ -211,7 +232,7 @@ trainer = AmpTrainer(
     t_lr=config.t_lr, t_wd=config.t_wd, t_beta=config.t_beta,
     init_temperature=config.init_temperature, temperature_decay=config.temperature_decay,
     logger=_logger, lr_scheduler={'T_max':400, 'logger':_logger, 'alpha':1e-4,
-                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98,'eta0':0.05},
+                                  'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98},
     gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log,
     dtype=args.dtype
 )
