@@ -1,4 +1,5 @@
-# train_cifar10_fp.py  — CIFAR-10 + AMP (fp32/fp16/bf16) + انتخاب صریح FLOPs یا Latency
+# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16) + انتخاب صریح FLOPs/Latency
+# + پشتیبانی از چندین batch-size که در هر ایپاک عوض می‌شود
 
 import os, sys, time, logging, argparse, json, importlib, inspect
 import numpy as np
@@ -26,9 +27,11 @@ class Config(object):
     t_lr = 0.01; t_wd = 5e-4; t_beta = (0.9, 0.999)
     # دما
     init_temperature = 5.0; temperature_decay = 0.956
-    # حلقه‌ها
+    # مسیر لاگ
     model_save_path = './term_output'
+    # تعداد کل ایپاک‌ها
     total_epoch = 10
+    # warmup برای w (فقط بارِ اول)
     start_w_epoch = 2
 
 config = Config()
@@ -40,12 +43,14 @@ logging.basicConfig(level=logging.INFO)
 parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
 
 # اجرای کلی
-parser.add_argument('--batch-size', type=int, default=256)
+parser.add_argument('--batch-sizes', type=str, default="256",
+                    help="لیست batch-size ها جدا با کاما. مثال: 32,64,128")
 parser.add_argument('--log-frequence', type=int, default=100)
 parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
+parser.add_argument('--total-epochs', type=int, default=config.total_epoch)
 
 # انتخاب معیار هزینه
 parser.add_argument('--cost-mode', choices=['flops','latency'], default='flops',
@@ -88,7 +93,7 @@ torch.backends.cuda.matmul.allow_tf32 = (args.dtype in ['fp32','bf16'])
 torch.backends.cudnn.allow_tf32 = (args.dtype in ['fp32','bf16'])
 
 # -------------------------
-# دیتاست و دیتالودر
+# دیتاست و ترنسفورم
 # -------------------------
 CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
 CIFAR_STD  = [0.24703233, 0.24348505, 0.26158768]
@@ -102,20 +107,8 @@ train_transform = transforms.Compose([
 
 train_data = dset.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
 
-train_queue = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-    num_workers=max(0, min(args.num_workers, 4)),
-    persistent_workers=True if args.num_workers > 0 else False,
-)
-
-val_queue = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=False, pin_memory=True,
-    num_workers=max(0, min(args.num_workers // 2, 2)),
-    persistent_workers=True if (args.num_workers // 2) > 0 else False,
-)
-
 # -------------------------
-# سازندهٔ داینامیک FBNet (با انتخاب صریح هزینه)
+# سازندهٔ FBNet (با انتخاب صریح هزینه)
 # -------------------------
 import supernet
 importlib.reload(supernet)
@@ -154,24 +147,23 @@ if args.cost_mode == 'flops':
     assert os.path.exists(flops_path), f"Missing FLOPs LUT: {flops_path}"
     model = FBNet(**common_kwargs,
                   flops_f=flops_path,
-                  alpha=args.lambda_flops,  # وزن FLOPs
+                  alpha=args.lambda_flops,
                   beta=args.beta)
     print(">> Built FBNet (FLOPs-only).")
 
-elif args.cost_mode == 'latency':
+else:  # latency
     assert 'speed_f' in params, "این نسخهٔ FBNet از speed_f پشتیبانی نمی‌کند."
     assert os.path.exists(latency_path), f"Missing latency LUT: {latency_path}"
-    # Energy اختیاری است؛ اگر مسیرش نباشد FBNet آن را صفر می‌گیرد.
     model = FBNet(**common_kwargs,
                   speed_f=latency_path,
                   energy_f=energy_path if (energy_path and os.path.exists(energy_path)) else None,
-                  alpha=args.alpha,  # وزن Latency
+                  alpha=args.alpha,
                   beta=args.beta,
                   gamma=0.0, delta=0.0)
     print(">> Built FBNet (latency-only).")
 
 # -------------------------
-# AmpTrainer: زیرکلاس Trainer با autocast/GradScaler
+# AmpTrainer
 # -------------------------
 from torch.cuda.amp import autocast, GradScaler
 
@@ -224,7 +216,7 @@ class AmpTrainer(Trainer):
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
 # -------------------------
-# ترینر و آموزش
+# ترینر
 # -------------------------
 trainer = AmpTrainer(
     network=model,
@@ -237,12 +229,35 @@ trainer = AmpTrainer(
     dtype=args.dtype
 )
 
-trainer.search(
-    train_queue, val_queue,
-    total_epoch=config.total_epoch,
-    start_w_epoch=args.warmup,
-    log_frequence=args.log_frequence,
-)
+# -------------------------
+# اجرای چند batch-size (سوییچ در هر ایپاک)
+# -------------------------
+batch_sizes = [int(x) for x in args.batch_sizes.split(',') if x.strip() != '']
+assert len(batch_sizes) > 0, "حداقل یک batch-size لازم است!"
+
+total_epochs = int(args.total_epochs)
+for epoch_idx in range(total_epochs):
+    bs = batch_sizes[epoch_idx % len(batch_sizes)]
+    print(f"\n[Epoch {epoch_idx+1}/{total_epochs}] Using batch-size = {bs}")
+
+    train_queue = torch.utils.data.DataLoader(
+        train_data, batch_size=bs, shuffle=True, pin_memory=True,
+        num_workers=max(0, min(args.num_workers, 4)),
+        persistent_workers=True if args.num_workers > 0 else False,
+    )
+
+    # می‌خواهیم هر ایپاک دقیقاً با همین batch-size اجرا شود.
+    # ترفند: search را با total_epoch=1 صدا می‌زنیم.
+    # warmup فقط در بار اول انجام شود:
+    warmup_this_round = args.warmup if epoch_idx == 0 else 0
+
+    trainer.search(
+        train_queue,               # train_w_ds
+        train_queue,               # train_t_ds (برای سادگی از همان استفاده می‌کنیم)
+        total_epoch=1,             # فقط یک ایپاک در این دور
+        start_w_epoch=warmup_this_round,
+        log_frequence=args.log_frequence,
+    )
 
 # -------------------------
 # خروجی معماری نهایی
