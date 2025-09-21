@@ -1,14 +1,12 @@
-# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16) + انتخاب صریح FLOPs یا Latency
-# + امکان محدودکردن تعداد مینی‌بچ در هر ایپاک با --steps-per-epoch
+# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16), cost-mode (flops|latency), full-epoch training
 
-import os, sys, time, logging, argparse, json, importlib, inspect
-import numpy as np
+import os, sys, logging, argparse, importlib, inspect
 import torch
 from torch import nn
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 
-# --- مسیر سورس را قبل از ایمپورت‌ها اضافه کن
+# --- مسیر سورس
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 
@@ -40,26 +38,25 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------
 parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
 
-# اجرای کلی
+# اجرا
 parser.add_argument('--batch-size', type=int, default=256)
-parser.add_argument('--steps-per-epoch', type=int, default=None,
-                    help='حداکثر تعداد مینی‌بچ در هر ایپاک. اگر None باشد، همهٔ مینی‌بچ‌ها اجرا می‌شوند.')
 parser.add_argument('--log-frequence', type=int, default=100)
 parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
+parser.add_argument('--total-epochs', type=int, default=config.total_epoch)
 
 # انتخاب معیار هزینه
 parser.add_argument('--cost-mode', choices=['flops','latency'], default='flops',
-                    help='انتخاب معیار هزینه: فقط flops یا فقط latency(+energy)')
+                    help='فقط flops یا فقط latency(+energy)')
 
 # پنالتی تعداد روندها (rounds)
-parser.add_argument('--eta', type=float, default=0.0, help='Scaling factor for rounds penalty')
+parser.add_argument('--eta', type=float, default=0.0, help='rounds penalty weight')
 
 # دقت شناور
 parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
-                    help='Numerics for AMP: fp32 (off), fp16, or bf16')
+                    help='AMP dtype')
 
 # FLOPs
 parser.add_argument('--flops-file', type=str, default='flops.txt',
@@ -67,13 +64,13 @@ parser.add_argument('--flops-file', type=str, default='flops.txt',
 parser.add_argument('--lambda-flops', type=float, default=1e-2,
                     help='scale for FLOPs loss term (alpha)')
 parser.add_argument('--beta', type=float, default=1.0,
-                    help='power for cost term (beta) — هم برای FLOPs و هم Latency استفاده می‌شود')
+                    help='power for cost term (beta) — هم برای FLOPs و هم Latency')
 
 # Latency/Energy
 parser.add_argument('--latency-file', type=str, default='rpi_speed.txt',
                     help='Latency LUT (per layer, per op)')
 parser.add_argument('--energy-file', type=str, default=None,
-                    help='Energy LUT (اختیاری). اگر خالی باشد، انرژی صفر فرض می‌شود.')
+                    help='Energy LUT (اختیاری). اگر نباشد صفر فرض می‌شود.')
 parser.add_argument('--alpha', type=float, default=1e-2,
                     help='scale for latency loss term (alpha)')
 
@@ -85,7 +82,7 @@ os.makedirs(args.model_save_path, exist_ok=True)
 _set_file(os.path.join(args.model_save_path, 'log.log'))
 
 # -------------------------
-# دقت شناور و بهینه‌سازی matmul
+# AMP/TF32
 # -------------------------
 torch.backends.cuda.matmul.allow_tf32 = (args.dtype in ['fp32','bf16'])
 torch.backends.cudnn.allow_tf32 = (args.dtype in ['fp32','bf16'])
@@ -117,32 +114,8 @@ val_queue = torch.utils.data.DataLoader(
     persistent_workers=True if (args.num_workers // 2) > 0 else False,
 )
 
-# ---- محدودکنندهٔ تعداد گام‌های هر ایپاک ----
-class LimitedLoader:
-    def __init__(self, dl, max_steps: int):
-        self.dl = dl
-        self.max_steps = int(max_steps)
-    def __iter__(self):
-        cnt = 0
-        for batch in self.dl:
-            yield batch
-            cnt += 1
-            if cnt >= self.max_steps:
-                break
-    def __len__(self):
-        try:
-            return min(self.max_steps, len(self.dl))
-        except TypeError:
-            return self.max_steps
-
-if args.steps_per_epoch is not None:
-    train_queue = LimitedLoader(train_queue, args.steps_per_epoch)
-    val_queue   = LimitedLoader(val_queue,   args.steps_per_epoch)
-    if args.log_frequence > args.steps_per_epoch:
-        args.log_frequence = args.steps_per_epoch
-
 # -------------------------
-# سازندهٔ داینامیک FBNet (با انتخاب صریح هزینه)
+# سازنده FBNet (با انتخاب هزینه)
 # -------------------------
 import supernet
 importlib.reload(supernet)
@@ -181,23 +154,22 @@ if args.cost_mode == 'flops':
     assert os.path.exists(flops_path), f"Missing FLOPs LUT: {flops_path}"
     model = FBNet(**common_kwargs,
                   flops_f=flops_path,
-                  alpha=args.lambda_flops,  # وزن FLOPs
+                  alpha=args.lambda_flops,
                   beta=args.beta)
     print(">> Built FBNet (FLOPs-only).")
-
-elif args.cost_mode == 'latency':
+else:
     assert 'speed_f' in params, "این نسخهٔ FBNet از speed_f پشتیبانی نمی‌کند."
     assert os.path.exists(latency_path), f"Missing latency LUT: {latency_path}"
     model = FBNet(**common_kwargs,
                   speed_f=latency_path,
                   energy_f=energy_path if (energy_path and os.path.exists(energy_path)) else None,
-                  alpha=args.alpha,  # وزن Latency
+                  alpha=args.alpha,
                   beta=args.beta,
                   gamma=0.0, delta=0.0)
     print(">> Built FBNet (latency-only).")
 
 # -------------------------
-# AmpTrainer: زیرکلاس Trainer با autocast/GradScaler
+# AmpTrainer (Scaler فقط برای w، نه برای theta)
 # -------------------------
 from torch.cuda.amp import autocast, GradScaler
 
@@ -215,6 +187,7 @@ class AmpTrainer(Trainer):
     def _maybe_autocast(self):
         return autocast(dtype=self.autocast_dtype) if self.autocast_dtype else torch.cuda.amp.autocast(enabled=False)
 
+    # w به‌همراه GradScaler
     def train_w(self, input, target, decay_temperature=False):
         self.w_opt.zero_grad(set_to_none=True)
         with self._maybe_autocast():
@@ -232,20 +205,21 @@ class AmpTrainer(Trainer):
             self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
+    # theta بدون GradScaler (برای جلوگیری از خطای step() already called)
     def train_t(self, input, target, decay_temperature=False):
-      self.t_opt.zero_grad(set_to_none=True)
-    # AMP خاموش برای θ
-      with torch.cuda.amp.autocast(enabled=False):
-          loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
-      loss.backward()      # بدون scaler
-      self.t_opt.step()
-      if decay_temperature:
-        tmp = self.temp; self.temp *= self._tem_decay
-        self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-      return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
+        self.t_opt.zero_grad(set_to_none=True)
+        with self._maybe_autocast():
+            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
+        loss.backward()
+        self.t_opt.step()
+        if decay_temperature:
+            tmp = self.temp
+            self.temp *= self._tem_decay
+            self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
+        return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
 # -------------------------
-# ترینر و آموزش
+# ترینر و آموزش (ایپاک کامل، بدون محدودیت گام)
 # -------------------------
 trainer = AmpTrainer(
     network=model,
@@ -260,7 +234,7 @@ trainer = AmpTrainer(
 
 trainer.search(
     train_queue, val_queue,
-    total_epoch=config.total_epoch,
+    total_epoch=args.total_epochs,
     start_w_epoch=args.warmup,
     log_frequence=args.log_frequence,
 )
@@ -274,9 +248,9 @@ try:
 except Exception:
     net = trainer._mod.module if hasattr(trainer._mod, "module") else trainer._mod
     selected_ops = [int(torch.argmax(t.detach().cpu()).item()) for t in net.theta]
-    payload = {"selected_ops": selected_ops}
+    import json
     with open(out_json, "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump({"selected_ops": selected_ops}, f, indent=2)
     print("\n=== FBNet Final Architecture (fallback) ===")
     for i, op in enumerate(selected_ops):
         print(f"Layer {i:02d}: op={op}")
