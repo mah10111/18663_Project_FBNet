@@ -233,20 +233,16 @@ class AmpTrainer(Trainer):
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
     def train_t(self, input, target, decay_temperature=False):
-        self.t_opt.zero_grad(set_to_none=True)
-        with self._maybe_autocast():
-            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
-        if self.scaler.is_enabled():
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.t_opt)
-        else:
-            loss.backward()
-            self.t_opt.step()
-        if decay_temperature:
-            tmp = self.temp
-            self.temp *= self._tem_decay
-            self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
-        return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
+    self.t_opt.zero_grad(set_to_none=True)
+    # AMP خاموش برای θ
+    with torch.cuda.amp.autocast(enabled=False):
+        loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
+    loss.backward()      # بدون scaler
+    self.t_opt.step()
+    if decay_temperature:
+        tmp = self.temp; self.temp *= self._tem_decay
+        self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
+    return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
 # -------------------------
 # ترینر و آموزش
