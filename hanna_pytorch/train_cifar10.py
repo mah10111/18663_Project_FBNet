@@ -1,10 +1,11 @@
-# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16), cost-mode (flops|latency), full-epoch training
+# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16), cost-mode (flops|latency), full-epoch training (with max-batches)
 
 import os, sys, logging, argparse, importlib, inspect
 import torch
 from torch import nn
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
+from itertools import islice  # NEW
 
 # --- مسیر سورس
 here = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +47,10 @@ parser.add_argument('--num-workers', type=int, default=4)
 parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
 parser.add_argument('--total-epochs', type=int, default=config.total_epoch)
+
+# ⬇️ تعداد مینی‌بچ که در هر ایپاک اجرا می‌شود (۰ = کل ایپاک)
+parser.add_argument('--max-batches', type=int, default=0,
+                    help='اگر >0 باشد، در هر ایپاک فقط همین تعداد batch اجرا می‌شود (برای هم w و هم theta).')
 
 # انتخاب معیار هزینه
 parser.add_argument('--cost-mode', choices=['flops','latency'], default='flops',
@@ -102,17 +107,44 @@ train_transform = transforms.Compose([
 
 train_data = dset.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
 
-train_queue = torch.utils.data.DataLoader(
+base_train_loader = torch.utils.data.DataLoader(
     train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True,
     num_workers=max(0, min(args.num_workers, 4)),
     persistent_workers=True if args.num_workers > 0 else False,
 )
 
-val_queue = torch.utils.data.DataLoader(
+base_val_loader = torch.utils.data.DataLoader(
     train_data, batch_size=args.batch_size, shuffle=False, pin_memory=True,
     num_workers=max(0, min(args.num_workers // 2, 2)),
     persistent_workers=True if (args.num_workers // 2) > 0 else False,
 )
+
+# --- محدودکنندهٔ تعداد بچ در هر ایپاک (بدون تغییر در Trainer) ---
+class TakeNBatches:
+    """هر بار که __iter__ صدا شود، فقط n مینی‌بچ از loader اصلی برمی‌گرداند."""
+    def __init__(self, loader, n):
+        self.loader = loader
+        self.n = int(n)
+
+    def __iter__(self):
+        if self.n <= 0:
+            # ۰ یعنی کل ایپاک
+            return iter(self.loader)
+        return islice(self.loader, self.n)
+
+    def __len__(self):
+        try:
+            L = len(self.loader)
+        except TypeError:
+            return self.n if self.n > 0 else 0
+        return min(L, self.n) if self.n > 0 else L
+
+if args.max_batches > 0:
+    train_queue = TakeNBatches(base_train_loader, args.max_batches)
+    val_queue   = TakeNBatches(base_val_loader,   args.max_batches)
+else:
+    train_queue = base_train_loader
+    val_queue   = base_val_loader
 
 # -------------------------
 # سازنده FBNet (با انتخاب هزینه)
@@ -205,7 +237,7 @@ class AmpTrainer(Trainer):
             self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
-    # theta بدون GradScaler (برای جلوگیری از خطای step() already called)
+    # theta بدون GradScaler
     def train_t(self, input, target, decay_temperature=False):
         self.t_opt.zero_grad(set_to_none=True)
         with self._maybe_autocast():
@@ -219,7 +251,7 @@ class AmpTrainer(Trainer):
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
 # -------------------------
-# ترینر و آموزش (ایپاک کامل، بدون محدودیت گام)
+# ترینر و آموزش
 # -------------------------
 trainer = AmpTrainer(
     network=model,
@@ -233,7 +265,7 @@ trainer = AmpTrainer(
 )
 
 trainer.search(
-    train_queue, val_queue,
+    train_queue, base_val_loader,   # توجه: val_queue محدود نشده تا لاگ‌ها معنی‌دار بمانند
     total_epoch=args.total_epochs,
     start_w_epoch=args.warmup,
     log_frequence=args.log_frequence,
