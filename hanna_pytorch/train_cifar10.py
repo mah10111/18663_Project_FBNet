@@ -1,22 +1,23 @@
-# train_cifar10_fp.py — CIFAR-10 + AMP (fp32/fp16/bf16), cost-mode (flops|latency), full-epoch training (with max-batches)
+# train_fixed.py — نسخهٔ اصلاح‌شده (جدا‌سازی theta/w و محدودیت batch در هر epoch)
 
-import os, sys, logging, argparse, importlib, inspect
+import os, sys, logging, argparse, importlib, inspect, time
+import numpy as np
 import torch
 from torch import nn
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
-from itertools import islice  # NEW
 
-# --- مسیر سورس
+# مسیر سورس
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 
+# کلاس‌ها/توابع از پروژه
 from supernet import Trainer, FBNet
 from candblks import get_blocks
 from utils import _logger, _set_file
 
 # -------------------------
-# پیکربندی پایه
+# Config پایه (مثل فایل شما)
 # -------------------------
 class Config(object):
     num_cls_used = 0
@@ -28,8 +29,9 @@ class Config(object):
     init_temperature = 5.0; temperature_decay = 0.956
     # حلقه‌ها
     model_save_path = './term_output'
-    total_epoch = 10
-    start_w_epoch = 2
+    total_epoch = 90
+    start_w_epoch = 1
+    train_portion = 0.8
 
 config = Config()
 logging.basicConfig(level=logging.INFO)
@@ -37,63 +39,37 @@ logging.basicConfig(level=logging.INFO)
 # -------------------------
 # آرگومان‌ها
 # -------------------------
-parser = argparse.ArgumentParser(description="FBNet supernet on CIFAR-10 with AMP (fp32/fp16/bf16).")
-
-# اجرا
+parser = argparse.ArgumentParser(description="Train FBNet with separated theta/w and optional batch-limit per epoch.")
 parser.add_argument('--batch-size', type=int, default=256)
 parser.add_argument('--log-frequence', type=int, default=100)
 parser.add_argument('--gpus', type=str, default='0')
 parser.add_argument('--num-workers', type=int, default=4)
-parser.add_argument('--tb-log', type=str, default='run_fbnet_amp')
+parser.add_argument('--tb-log', type=str, default='run_fbnet_fix')
 parser.add_argument('--warmup', type=int, default=config.start_w_epoch)
 parser.add_argument('--total-epochs', type=int, default=config.total_epoch)
 
-# ⬇️ تعداد مینی‌بچ که در هر ایپاک اجرا می‌شود (۰ = کل ایپاک)
+# cost / LUTs
+parser.add_argument('--alpha', type=float, default=0.0)
+parser.add_argument('--beta', type=float, default=1.0)
+parser.add_argument('--gamma', type=float, default=0.0)
+parser.add_argument('--delta', type=float, default=0.0)
+parser.add_argument('--energy-file', type=str, default='new_rpi_energy.txt')
+parser.add_argument('--latency-file', type=str, default='rpi_speed.txt')
+parser.add_argument('--flops-file', type=str, default='flops.txt')
+
+# محدودیت تعداد batch در هر epoch (0 => نامحدود / تمام epoch)
 parser.add_argument('--max-batches', type=int, default=0,
-                    help='اگر >0 باشد، در هر ایپاک فقط همین تعداد batch اجرا می‌شود (برای هم w و هم theta).')
-
-# انتخاب معیار هزینه
-parser.add_argument('--cost-mode', choices=['flops','latency'], default='flops',
-                    help='فقط flops یا فقط latency(+energy)')
-
-# پنالتی تعداد روندها (rounds)
-parser.add_argument('--eta', type=float, default=0.0, help='rounds penalty weight')
-
-# دقت شناور
-parser.add_argument('--dtype', type=str, default='fp16', choices=['fp32','fp16','bf16'],
-                    help='AMP dtype')
-
-# FLOPs
-parser.add_argument('--flops-file', type=str, default='flops.txt',
-                    help='FLOPs LUT (per layer, per op)')
-parser.add_argument('--lambda-flops', type=float, default=1e-2,
-                    help='scale for FLOPs loss term (alpha)')
-parser.add_argument('--beta', type=float, default=1.0,
-                    help='power for cost term (beta) — هم برای FLOPs و هم Latency')
-
-# Latency/Energy
-parser.add_argument('--latency-file', type=str, default='rpi_speed.txt',
-                    help='Latency LUT (per layer, per op)')
-parser.add_argument('--energy-file', type=str, default=None,
-                    help='Energy LUT (اختیاری). اگر نباشد صفر فرض می‌شود.')
-parser.add_argument('--alpha', type=float, default=1e-2,
-                    help='scale for latency loss term (alpha)')
+                    help='If >0, limit number of batches per epoch to this value (faster debugging).')
 
 args = parser.parse_args()
 
 # paths & logs
-args.model_save_path = os.path.join(config.model_save_path, args.tb_log)
+args.model_save_path = '%s/%s/' % (config.model_save_path, args.tb_log)
 os.makedirs(args.model_save_path, exist_ok=True)
 _set_file(os.path.join(args.model_save_path, 'log.log'))
 
 # -------------------------
-# AMP/TF32
-# -------------------------
-torch.backends.cuda.matmul.allow_tf32 = (args.dtype in ['fp32','bf16'])
-torch.backends.cudnn.allow_tf32 = (args.dtype in ['fp32','bf16'])
-
-# -------------------------
-# دیتاست و دیتالودر
+# دیتاست و transforms
 # -------------------------
 CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
 CIFAR_STD  = [0.24703233, 0.24348505, 0.26158768]
@@ -107,142 +83,167 @@ train_transform = transforms.Compose([
 
 train_data = dset.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
 
-base_train_loader = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True,
-    num_workers=max(0, min(args.num_workers, 4)),
-    persistent_workers=True if args.num_workers > 0 else False,
+train_queue = torch.utils.data.DataLoader(
+  train_data, batch_size=args.batch_size,
+  shuffle=True, pin_memory=True,
+  num_workers=max(0, min(args.num_workers, 16)),
 )
 
-base_val_loader = torch.utils.data.DataLoader(
-    train_data, batch_size=args.batch_size, shuffle=False, pin_memory=True,
-    num_workers=max(0, min(args.num_workers // 2, 2)),
-    persistent_workers=True if (args.num_workers // 2) > 0 else False,
+val_queue = torch.utils.data.DataLoader(
+  train_data, batch_size=args.batch_size,
+  shuffle=False, pin_memory=True,
+  num_workers=max(0, min(args.num_workers // 2, 8)),
 )
-
-# --- محدودکنندهٔ تعداد بچ در هر ایپاک (بدون تغییر در Trainer) ---
-class TakeNBatches:
-    """هر بار که __iter__ صدا شود، فقط n مینی‌بچ از loader اصلی برمی‌گرداند."""
-    def __init__(self, loader, n):
-        self.loader = loader
-        self.n = int(n)
-
-    def __iter__(self):
-        if self.n <= 0:
-            # ۰ یعنی کل ایپاک
-            return iter(self.loader)
-        return islice(self.loader, self.n)
-
-    def __len__(self):
-        try:
-            L = len(self.loader)
-        except TypeError:
-            return self.n if self.n > 0 else 0
-        return min(L, self.n) if self.n > 0 else L
-
-if args.max_batches > 0:
-    train_queue = TakeNBatches(base_train_loader, args.max_batches)
-    val_queue   = TakeNBatches(base_val_loader,   args.max_batches)
-else:
-    train_queue = base_train_loader
-    val_queue   = base_val_loader
 
 # -------------------------
-# سازنده FBNet (با انتخاب هزینه)
+# LimitedDataLoader wrapper — هر epoch تا max_batches می‌دهد (قابل iterate مجدد)
+# -------------------------
+from itertools import islice
+
+class LimitedDataLoader:
+    def __init__(self, dataloader, max_batches=0):
+        self._dl = dataloader
+        self.max_batches = int(max_batches) if max_batches is not None else 0
+
+    def __iter__(self):
+        if self.max_batches and self.max_batches > 0:
+            return islice(iter(self._dl), self.max_batches)
+        else:
+            return iter(self._dl)
+
+    def __len__(self):
+        if self.max_batches and self.max_batches > 0:
+            return min(len(self._dl), self.max_batches)
+        else:
+            try:
+                return len(self._dl)
+            except Exception:
+                return 0
+
+# -------------------------
+# Loaderها را ممکن است محدود کنیم
+# -------------------------
+if args.max_batches and args.max_batches > 0:
+    train_loader_used = LimitedDataLoader(train_queue, args.max_batches)
+    val_loader_used = LimitedDataLoader(val_queue, args.max_batches)
+    _logger.info(f"Using LimitedDataLoader: max_batches={args.max_batches}")
+else:
+    train_loader_used = train_queue
+    val_loader_used = val_queue
+
+# -------------------------
+# FBNet سازنده
 # -------------------------
 import supernet
 importlib.reload(supernet)
 print("Using supernet from:", supernet.__file__)
 
-FBNet = supernet.FBNet
-sig = inspect.signature(FBNet.__init__)
-params = set(sig.parameters.keys())
-
 blocks = get_blocks(cifar10=True)
-num_classes = config.num_cls_used if config.num_cls_used > 0 else 10
-
-def resolve_here(p):
-    if not p: return p
-    return p if os.path.isabs(p) else os.path.join(here, p)
-
-flops_path   = resolve_here(args.flops_file)
-latency_path = resolve_here(args.latency_file)
-energy_path  = resolve_here(args.energy_file) if args.energy_file else None
-
-print(f"[PATH] cwd={os.getcwd()}")
-print(f"[PATH] flops_file   = {flops_path}   exists={os.path.exists(flops_path)}")
-print(f"[PATH] latency_file = {latency_path} exists={os.path.exists(latency_path)}")
-print(f"[PATH] energy_file  = {energy_path}  exists={os.path.exists(energy_path) if energy_path else 'n/a'}")
-
-common_kwargs = dict(
-    num_classes=num_classes,
-    blocks=blocks,
-    init_theta=config.init_theta,
-    dim_feature=1984,
-    eta=args.eta,
-)
-
-if args.cost_mode == 'flops':
-    assert 'flops_f' in params, "این نسخهٔ FBNet از flops_f پشتیبانی نمی‌کند."
-    assert os.path.exists(flops_path), f"Missing FLOPs LUT: {flops_path}"
-    model = FBNet(**common_kwargs,
-                  flops_f=flops_path,
-                  alpha=args.lambda_flops,
-                  beta=args.beta)
-    print(">> Built FBNet (FLOPs-only).")
-else:
-    assert 'speed_f' in params, "این نسخهٔ FBNet از speed_f پشتیبانی نمی‌کند."
-    assert os.path.exists(latency_path), f"Missing latency LUT: {latency_path}"
-    model = FBNet(**common_kwargs,
-                  speed_f=latency_path,
-                  energy_f=energy_path if (energy_path and os.path.exists(energy_path)) else None,
-                  alpha=args.alpha,
-                  beta=args.beta,
-                  gamma=0.0, delta=0.0)
-    print(">> Built FBNet (latency-only).")
+model = FBNet(num_classes=config.num_cls_used if config.num_cls_used > 0 else 10,
+              blocks=blocks,
+              init_theta=config.init_theta,
+              alpha=args.alpha,
+              beta=args.beta,
+              gamma=args.gamma,
+              delta=args.delta,
+              speed_f=args.latency_file,
+              energy_f=args.energy_file,
+              flops_f=args.flops_file)
 
 # -------------------------
-# AmpTrainer (Scaler فقط برای w، نه برای theta)
+# FixedTrainer: زیرکلاسِ Trainer که پارامترهای theta و weight را جدا می‌کند
 # -------------------------
-from torch.cuda.amp import autocast, GradScaler
-
-class AmpTrainer(Trainer):
-    def __init__(self, *a, dtype='fp16', **kw):
+class FixedTrainer(Trainer):
+    def __init__(self, *a, **kw):
+        # ابتدا __init__ اصلی را اجرا کن (تا بقیهٔ stateها درست ساخته شود)
         super().__init__(*a, **kw)
-        self.dtype = dtype
-        self.autocast_dtype = None
-        if dtype == 'fp16':
-            self.autocast_dtype = torch.float16
-        elif dtype == 'bf16':
-            self.autocast_dtype = torch.bfloat16
-        self.scaler = GradScaler(enabled=(dtype == 'fp16'))
 
-    def _maybe_autocast(self):
-        return autocast(dtype=self.autocast_dtype) if self.autocast_dtype else torch.cuda.amp.autocast(enabled=False)
+        # از unwrap کردن module استفاده می‌کنیم تا به net اصلی دسترسی داشته باشیم
+        net_for_params = self._mod.module if hasattr(self._mod, "module") else self._mod
 
-    # w به‌همراه GradScaler
+        # فهرست theta از شبکه (باید توسط FBNet ساخته شده باشد)
+        if not hasattr(net_for_params, "theta"):
+            raise RuntimeError("Network does not have attribute 'theta' — cannot separate parameters.")
+
+        self.theta = net_for_params.theta
+        theta_ids = {id(t) for t in self.theta}
+
+        # جمع‌آوری وزن‌ها (تمام پارامترها به جز theta)
+        w_params = [p for p in net_for_params.parameters() if id(p) not in theta_ids]
+
+        # debug prints
+        num_theta = sum(p.numel() for p in self.theta)
+        num_w = sum(p.numel() for p in w_params)
+        print(f"[FixedTrainer] theta params: {num_theta}  weight params: {num_w}")
+
+        # بازسازی اپتیمایزرها فقط برای پارامترهای صحیح
+        # Note: قبلا parent __init__ مولدهای دیگری ساخته بود؛ ما آن‌ها را بازنویسی می‌کنیم.
+        import torch.optim as optim
+        self.w = w_params
+        self.w_opt = optim.SGD(self.w, lr=kw.get('w_lr', 0.01) if 'w_lr' in kw else 0.01,
+                               momentum=kw.get('w_mom', 0.9) if 'w_mom' in kw else 0.9,
+                               weight_decay=kw.get('w_wd', 1e-4) if 'w_wd' in kw else 1e-4)
+        # حفظ scheduler قبلی interface
+        try:
+            self.w_sche = CosineDecayLR(self.w_opt, **kw.get('lr_scheduler', {'T_max':200}))
+        except Exception:
+            # اگر چیزی نامناسب بود، ignore کن
+            self.w_sche = None
+
+        # theta optimizer (Adam) مجددا تنظیم می‌شود
+        self.t_opt = torch.optim.Adam(self.theta,
+                                      lr=kw.get('t_lr', 0.001) if 't_lr' in kw else 0.001,
+                                      betas=kw.get('t_beta', (0.5, 0.999)) if 't_beta' in kw else (0.5,0.999),
+                                      weight_decay=kw.get('t_wd', 3e-3) if 't_wd' in kw else 3e-3)
+
+    # override train_w to be explicit (همان منطق parent، با اطمینان از اینکه w_opt فقط روی weight هاست)
     def train_w(self, input, target, decay_temperature=False):
         self.w_opt.zero_grad(set_to_none=True)
-        with self._maybe_autocast():
-            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
-        if self.scaler.is_enabled():
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.w_opt)
-            self.scaler.update()
+        loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
+        loss.backward()
+
+        # debug: مقدار نُرم گرادیان weightها
+        total_grad_norm = 0.0
+        any_grad = False
+        for p in self.w:
+            if p.grad is not None:
+                any_grad = True
+                try:
+                    total_grad_norm += float(p.grad.data.norm(2).item())
+                except Exception:
+                    pass
+        if not any_grad:
+            self.logger.warning("[FixedTrainer] No gradients for weight params!")
         else:
-            loss.backward()
-            self.w_opt.step()
+            self.logger.info(f"[FixedTrainer] w grad norm sum: {total_grad_norm:.6f}")
+
+        self.w_opt.step()
         if decay_temperature:
             tmp = self.temp
             self.temp *= self._tem_decay
             self.logger.info("Change temperature from %.5f to %.5f" % (tmp, self.temp))
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
-    # theta بدون GradScaler
     def train_t(self, input, target, decay_temperature=False):
         self.t_opt.zero_grad(set_to_none=True)
-        with self._maybe_autocast():
-            loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
+        loss, ce, lat, acc, ener = self._mod(input, target, self.temp)
         loss.backward()
+
+        # debug theta grads
+        t_grad_norm = 0.0
+        any_t_grad = False
+        for p in self.theta:
+            if p.grad is not None:
+                any_t_grad = True
+                try:
+                    t_grad_norm += float(p.grad.data.norm(2).item())
+                except Exception:
+                    pass
+        if not any_t_grad:
+            self.logger.warning("[FixedTrainer] No gradients for theta params!")
+        else:
+            self.logger.info(f"[FixedTrainer] theta grad norm sum: {t_grad_norm:.6f}")
+
         self.t_opt.step()
         if decay_temperature:
             tmp = self.temp
@@ -251,30 +252,31 @@ class AmpTrainer(Trainer):
         return loss.item(), ce.item(), lat.item(), acc.item(), ener.item()
 
 # -------------------------
-# ترینر و آموزش
+# trainer ساخته و اجرا
 # -------------------------
-trainer = AmpTrainer(
+trainer = FixedTrainer(
     network=model,
     w_lr=config.w_lr, w_mom=config.w_mom, w_wd=config.w_wd,
     t_lr=config.t_lr, t_wd=config.t_wd, t_beta=config.t_beta,
     init_temperature=config.init_temperature, temperature_decay=config.temperature_decay,
     logger=_logger, lr_scheduler={'T_max':400, 'logger':_logger, 'alpha':1e-4,
                                   'warmup_step':100, 't_mul':1.5, 'lr_mul':0.98},
-    gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log,
-    dtype=args.dtype
+    gpus=args.gpus, save_tb_log=args.tb_log, save_theta_prefix=args.tb_log
 )
 
+# اگر از LimitedDataLoader استفاده می‌کنیم trainer.search انتظار iterable دارد — درست است.
 trainer.search(
-    train_queue, base_val_loader,   # توجه: val_queue محدود نشده تا لاگ‌ها معنی‌دار بمانند
+    train_loader_used,   # train_w_ds
+    val_loader_used,     # train_t_ds (برای سادگی از validation یا همان train استفاده شده)
     total_epoch=args.total_epochs,
     start_w_epoch=args.warmup,
-    log_frequence=args.log_frequence,
+    log_frequence=args.log_frequence
 )
 
 # -------------------------
 # خروجی معماری نهایی
 # -------------------------
-out_json = "./final_arch.json"
+out_json = os.path.join(args.model_save_path, "final_arch.json")
 try:
     trainer.export_final_architecture(out_json=out_json, print_table=True)
 except Exception:
