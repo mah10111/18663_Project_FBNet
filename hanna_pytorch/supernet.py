@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import inspect  # ← for adapting CosineDecayLR kwargs
 
 # NOTE: این‌ها باید در utils موجود باشند
 from utils import (
@@ -61,18 +60,6 @@ def _pad_last_column_to_same_length(mat):
     return mat
 
 
-def _to_const_tensor(x):
-    """
-    Safely create a non-trainable tensor from list/ndarray/tensor
-    without triggering 'copy construct from a tensor' warnings.
-    """
-    if isinstance(x, torch.Tensor):
-        t = x.detach().clone()
-    else:
-        t = torch.as_tensor(x)
-    return t.requires_grad_(False)
-
-
 # =========================
 # Mixed operation container
 # =========================
@@ -105,8 +92,15 @@ class FBNet(nn.Module):
                  flops_f='./flops.txt',
                  # loss scalars
                  alpha=0.0, beta=0.0, gamma=0.0, delta=0.0, eta=0.0,
+                 # کنترل هزینه‌ی روندها/سخت‌افزار
+                 round_factor=1.0,        # ضریب مستقیم روی rounds
+                 pe_capacity=50000,       # ظرفیت هر PE (ops)
+                 num_pe=20,               # تعداد PE
+                 capacity_scale=1.0,      # ضرب‌کننده‌ی ظرفیت کل (برای کاهش/افزایش ظرفیت مؤثر)
+                 # سایر
                  criterion=nn.CrossEntropyLoss(),
-                 dim_feature=1984):
+                 dim_feature=1984,
+                 hard_choice=False):       # اگر True فقط argmax انتخاب شود
         super().__init__()
 
         # store basics
@@ -116,6 +110,14 @@ class FBNet(nn.Module):
         self._gamma = float(gamma)
         self._delta = float(delta)
         self._eta   = float(eta)
+
+        # rounds / hardware knobs
+        self._round_factor   = float(round_factor)
+        self._pe_capacity    = float(pe_capacity)
+        self._num_pe         = int(num_pe)
+        self._capacity_scale = float(capacity_scale)
+        self._hard_choice    = bool(hard_choice)
+
         self._criterion = criterion  # moved device-sync to forward
         self.dim_feature = dim_feature
 
@@ -166,11 +168,11 @@ class FBNet(nn.Module):
         if speed_mat is None and energy_mat is not None:
             speed_mat = [[0.0] * len(r) for r in energy_mat]
 
-        self._speed  = _to_const_tensor(speed_mat)   if speed_mat  is not None else None
-        self._energy = _to_const_tensor(energy_mat)  if energy_mat is not None else None
+        self._speed  = torch.tensor(speed_mat,  requires_grad=False) if speed_mat  is not None else None
+        self._energy = torch.tensor(energy_mat, requires_grad=False) if energy_mat is not None else None
 
         fl = load_flops_lut(flops_f) if os.path.exists(flops_f) else None
-        self._flops = _to_const_tensor(fl) if fl is not None else None
+        self._flops = torch.tensor(fl, requires_grad=False) if fl is not None else None
 
         # classifier head
         self.classifier = nn.Linear(dim_feature, num_classes)
@@ -184,9 +186,20 @@ class FBNet(nn.Module):
         elif self._speed is not None:
             mode = "latency-only"
         print(f"[FBNet] init → mode={mode}, alpha={self._alpha}, beta={self._beta}, gamma={self._gamma}, delta={self._delta}, eta={self._eta}")
+        print(f"[FBNet] rounds: factor={self._round_factor}  pe_capacity={self._pe_capacity}  num_pe={self._num_pe}  capacity_scale={self._capacity_scale}  hard_choice={self._hard_choice}")
         if self._flops is not None:  print(f"[FBNet] FLOPs LUT entries   : {self._flops.shape[0]}")
         if self._speed  is not None: print(f"[FBNet] Latency LUT entries : {self._speed.shape[0]}")
         if self._energy is not None: print(f"[FBNet] Energy LUT entries  : {self._energy.shape[0]}")
+
+    # ---- public setters (اختیاری: در صورت نیاز از بیرون تغییر بده)
+    def set_rounds_penalty(self, eta=None, round_factor=None):
+        if eta is not None: self._eta = float(eta)
+        if round_factor is not None: self._round_factor = float(round_factor)
+
+    def set_hardware_capacity(self, pe_capacity=None, num_pe=None, capacity_scale=None):
+        if pe_capacity is not None:    self._pe_capacity = float(pe_capacity)
+        if num_pe is not None:         self._num_pe = int(num_pe)
+        if capacity_scale is not None: self._capacity_scale = float(capacity_scale)
 
     def forward(self, input, target, temperature=5.0, theta_list=None):
         device = input.device
@@ -207,9 +220,15 @@ class FBNet(nn.Module):
                 blk_len = len(block)
 
                 theta = self.theta[theta_idx] if theta_list is None else theta_list[theta_idx]
-                # NOTE: gumbel_softmax از utils هم هست، ولی اینجا از torch استفاده می‌کنیم
                 t = theta.to(device).repeat(batch_size, 1)
-                weight = F.gumbel_softmax(t, tau=temperature, hard=False)
+
+                # انتخاب وزن‌ها: gumbel_softmax (پیش‌فرض) یا انتخاب سخت‌گیرانه (argmax)
+                if self._hard_choice:
+                    # یک اپ را سفت انتخاب کن (بدون ترکیب) — برای سرعت/پایداری
+                    idx = torch.argmax(t[0], dim=0)
+                    weight = torch.zeros_like(t).scatter_(1, idx.view(1, 1).repeat(batch_size, 1), 1.0)
+                else:
+                    weight = F.gumbel_softmax(t, tau=temperature, hard=False)
 
                 # ----- FLOPs -----
                 flops_ = None
@@ -228,13 +247,16 @@ class FBNet(nn.Module):
                     ener_ = weight * energy.repeat(batch_size, 1)
                     ener_terms.append(torch.sum(ener_))
 
-                # ----- Hardware rounds (optional; only if FLOPs present) -----
+                # ----- Hardware rounds (only if FLOPs present) -----
                 if flops_ is not None:
-                    ops_this_layer = torch.sum(flops_).item() * 1e9  # assuming flops in GOp
-                    pe_capacity = 50000
-                    num_pe = 20
-                    total_capacity = num_pe * pe_capacity
+                    # total capacity with scaling
+                    total_capacity = self._num_pe * self._pe_capacity * self._capacity_scale
+                    total_capacity = max(total_capacity, 1.0)
+                    # فرض flops در GOp
+                    ops_this_layer = torch.sum(flops_).item() * 1e9
                     rounds = int((ops_this_layer + total_capacity - 1) // total_capacity)
+                    # ضریب‌دهی مستقیم:
+                    rounds = max(1, int(rounds * self._round_factor))
                     self.rounds_per_layer.append(rounds)
 
                 # mixed op forward
@@ -259,7 +281,7 @@ class FBNet(nn.Module):
         pred = torch.argmax(logits, dim=1)
         acc = torch.sum(pred == target).float() / batch_size
 
-        # optional rounds penalty
+        # rounds penalty
         max_rounds = max(self.rounds_per_layer) if len(self.rounds_per_layer) > 0 else 0
         rounds_loss = torch.tensor(float(max_rounds), dtype=torch.float32, device=device)
 
@@ -321,60 +343,7 @@ class Trainer(object):
         self._ener_avg= AvgrageMeter('ener')
 
         self.w_opt = torch.optim.SGD(self.w, lr=w_lr, momentum=w_mom, weight_decay=w_wd)
-
-        # --- Normalize & adapt LR scheduler kwargs to actual CosineDecayLR signature ---
-        if not isinstance(lr_scheduler, dict):
-            lr_scheduler = {}
-
-        sched_kwargs = {}
-        # Map T_max (accept T_max / t_max, default 200)
-        if 'T_max' in lr_scheduler:
-            sched_kwargs['T_max'] = lr_scheduler['T_max']
-        elif 't_max' in lr_scheduler:
-            sched_kwargs['T_max'] = lr_scheduler['t_max']
-        else:
-            sched_kwargs['T_max'] = 200
-
-        # Collect eta-min style value if provided under various names
-        eta_val = None
-        if 'eta_min' in lr_scheduler:
-            eta_val = lr_scheduler['eta_min']
-        elif 'eta0' in lr_scheduler:
-            eta_val = lr_scheduler['eta0']
-        elif 'lr_min' in lr_scheduler:
-            eta_val = lr_scheduler['lr_min']
-        elif 'min_lr' in lr_scheduler:
-            eta_val = lr_scheduler['min_lr']
-
-        # Optional last_epoch passthrough
-        if 'last_epoch' in lr_scheduler:
-            sched_kwargs['last_epoch'] = lr_scheduler['last_epoch']
-
-        # Read actual __init__ signature of CosineDecayLR
-        sig = inspect.signature(CosineDecayLR.__init__)
-        accepted = set(sig.parameters.keys()) - {'self'}
-
-        # Place T_max under alternative name if needed
-        if 'T_max' not in accepted and 't_max' in accepted and 'T_max' in sched_kwargs:
-            sched_kwargs['t_max'] = sched_kwargs.pop('T_max')
-
-        # Place eta under whatever name the scheduler expects
-        if eta_val is not None:
-            if 'eta_min' in accepted:
-                sched_kwargs['eta_min'] = eta_val
-            elif 'lr_min' in accepted:
-                sched_kwargs['lr_min'] = eta_val
-            elif 'eta0' in accepted:
-                sched_kwargs['eta0'] = eta_val
-            # else: scheduler has no min-lr parameter → skip
-
-        # Drop any unknown kwargs to avoid TypeError
-        for k in list(sched_kwargs.keys()):
-            if k not in accepted:
-                sched_kwargs.pop(k, None)
-
-        # Build the scheduler safely
-        self.w_sche = CosineDecayLR(self.w_opt, **sched_kwargs)
+        self.w_sche = CosineDecayLR(self.w_opt, **lr_scheduler)
 
         self.t_opt = torch.optim.Adam(self.theta, lr=t_lr, betas=t_beta, weight_decay=t_wd)
 
