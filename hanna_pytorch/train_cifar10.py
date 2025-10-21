@@ -86,7 +86,9 @@ def lora_state_dict(model: nn.Module):
 
 def save_lora(model: nn.Module, path: str):
     sd = lora_state_dict(model)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    dirn = os.path.dirname(path)
+    if dirn:
+        os.makedirs(dirn, exist_ok=True)
     torch.save(sd, path)
 
 def load_lora_into_model(model: nn.Module, path: str, strict=False):
@@ -373,6 +375,10 @@ if __name__ == "__main__":
         net = trainer._mod.module if hasattr(trainer._mod, "module") else trainer._mod
         selected_ops = [int(torch.argmax(t.detach().cpu()).item()) for t in net.theta]
         payload = {"selected_ops": selected_ops}
+        # ensure output dir exists (if any)
+        out_dir = os.path.dirname(out_json)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         with open(out_json, "w") as f:
             json.dump(payload, f, indent=2)
         print("\n=== FBNet Final Architecture (fallback) ===")
@@ -400,118 +406,146 @@ if __name__ == "__main__":
 
     final_archs_path = resolve_here("./final_archs.json")
     top_k = max(1, int(args.top_k))
-    archs = derive_topk_architectures(trainer, k=top_k)
-    # save them
-    with open(final_archs_path, "w") as f:
-        json.dump({"selected_ops_list": archs}, f, indent=2)
-    print(f"[POST-NAS] Saved top-{top_k} architectures → {final_archs_path}")
+
+    # Try to derive and save top-k; if that fails, fallback to using final_arch.json (single best)
+    try:
+        archs = derive_topk_architectures(trainer, k=top_k)
+        # ensure dir exists
+        archs_dir = os.path.dirname(final_archs_path)
+        if archs_dir:
+            os.makedirs(archs_dir, exist_ok=True)
+        with open(final_archs_path, "w") as f:
+            json.dump({"selected_ops_list": archs}, f, indent=2)
+        print(f"[POST-NAS] Saved top-{top_k} architectures → {final_archs_path}")
+
+    except Exception as e:
+        print(f"[WARNING] derive_topk_architectures failed: {e}. Trying fallback from final_arch.json ...")
+        fallback_arch = resolve_here("./final_arch.json")
+        if os.path.exists(fallback_arch):
+            with open(fallback_arch, "r") as f:
+                data = json.load(f)
+            selected_ops = data.get("selected_ops", [])
+            archs = [selected_ops] if selected_ops else []
+            # ensure dir exists
+            archs_dir = os.path.dirname(final_archs_path)
+            if archs_dir:
+                os.makedirs(archs_dir, exist_ok=True)
+            with open(final_archs_path, "w") as f:
+                json.dump({"selected_ops_list": archs}, f, indent=2)
+            print(f"[POST-NAS] Fallback: created {final_archs_path} from final_arch.json")
+        else:
+            print("[ERROR] No final_arch.json to fallback to. Please run NAS first and ensure final_arch.json exists.")
+            archs = []
 
     # If user requested LoRA post-processing, run fine-tune for each arch
     if args.post_lora:
-        print("[POST-NAS] Starting LoRA fine-tune for selected architectures...")
-        adapters_dir = resolve_here("./adapters")
-        os.makedirs(adapters_dir, exist_ok=True)
+        if not archs:
+            print("[POST-NAS] No architectures available for LoRA post-processing. Exiting post-lora step.")
+        else:
+            print("[POST-NAS] Starting LoRA fine-tune for selected architectures...")
+            adapters_dir = resolve_here("./adapters")
+            os.makedirs(adapters_dir, exist_ok=True)
 
-        # Attempt to import peft if user asked; fallback to our lightweight LoRAConv2d
-        use_peft = False
-        if args.use_peft:
-            try:
-                from peft import get_peft_model, LoraConfig, TaskType
-                use_peft = True
-                print("[POST-NAS] peft imported successfully; will use get_peft_model if compatible.")
-            except Exception as e:
-                print("[POST-NAS] peft import failed, falling back to internal LoRAConv2d. Error:", e)
-                use_peft = False
-
-        # build fresh base model (same builder as earlier)
-        # We'll instantiate a new FBNet for each arch so weights are consistent with base initialization
-        for i, arch in enumerate(archs):
-            arch_name = f"arch_top{i+1}"
-            print(f"\n[POST-NAS] Fine-tuning {arch_name} with LoRA: arch len={len(arch)}")
-
-            # instantiate base model (same as build_model)
-            sub_model = build_model(args)
-            sub_model = sub_model.cuda()
-            sub_model.train()
-
-            # create theta_list one-hot tensors for forward override (lengths must align)
-            theta_onehots = []
-            for layer_idx, t in enumerate(sub_model.theta):
-                num_ops = t.shape[0]
-                chosen = arch[layer_idx] if layer_idx < len(arch) else int(torch.argmax(t).item())
-                onehot = torch.zeros((num_ops,), dtype=torch.float32)
-                onehot[chosen] = 1.0
-                theta_onehots.append(onehot)
-
-            # Apply LoRA: either via peft (if supports arbitrary modules) or via inject_lora_conv
-            if use_peft:
+            # Attempt to import peft if user asked; fallback to our lightweight LoRAConv2d
+            use_peft = False
+            if args.use_peft:
                 try:
-                    # Try to configure peft for feature-extraction style (vision)
-                    lora_cfg = LoraConfig(task_type=TaskType.FEATURE_EXTRACTION,
-                                          r=args.lora_r, lora_alpha=args.lora_alpha,
-                                          target_modules=["conv", "Conv2d", "Conv"], lora_dropout=0.1)
-                    lora_model = get_peft_model(sub_model, lora_cfg)
-                    print("[POST-NAS] Applied PEFT LoRA to model.")
+                    from peft import get_peft_model, LoraConfig, TaskType
+                    use_peft = True
+                    print("[POST-NAS] peft imported successfully; will use get_peft_model if compatible.")
                 except Exception as e:
-                    print("[POST-NAS] PEFT application failed; falling back. Error:", e)
-                    print("[POST-NAS] Using internal LoRAConv2d injection.")
+                    print("[POST-NAS] peft import failed, falling back to internal LoRAConv2d. Error:", e)
+                    use_peft = False
+
+            # build fresh base model (same builder as earlier)
+            # We'll instantiate a new FBNet for each arch so weights are consistent with base initialization
+            for i, arch in enumerate(archs):
+                arch_name = f"arch_top{i+1}"
+                print(f"\n[POST-NAS] Fine-tuning {arch_name} with LoRA: arch len={len(arch)}")
+
+                # instantiate base model (same as build_model)
+                sub_model = build_model(args)
+                sub_model = sub_model.cuda()
+                sub_model.train()
+
+                # create theta_list one-hot tensors for forward override (lengths must align)
+                theta_onehots = []
+                for layer_idx, t in enumerate(sub_model.theta):
+                    num_ops = t.shape[0]
+                    chosen = arch[layer_idx] if layer_idx < len(arch) else int(torch.argmax(t).item())
+                    onehot = torch.zeros((num_ops,), dtype=torch.float32)
+                    onehot[chosen] = 1.0
+                    theta_onehots.append(onehot)
+
+                # Apply LoRA: either via peft (if supports arbitrary modules) or via inject_lora_conv
+                if use_peft:
+                    try:
+                        # Try to configure peft for feature-extraction style (vision)
+                        lora_cfg = LoraConfig(task_type=TaskType.FEATURE_EXTRACTION,
+                                              r=args.lora_r, lora_alpha=args.lora_alpha,
+                                              target_modules=["conv", "Conv2d", "Conv"], lora_dropout=0.1)
+                        lora_model = get_peft_model(sub_model, lora_cfg)
+                        print("[POST-NAS] Applied PEFT LoRA to model.")
+                    except Exception as e:
+                        print("[POST-NAS] PEFT application failed; falling back. Error:", e)
+                        print("[POST-NAS] Using internal LoRAConv2d injection.")
+                        lora_model = inject_lora_conv(sub_model, r=args.lora_r, alpha=args.lora_alpha, target_names=None)
+                else:
                     lora_model = inject_lora_conv(sub_model, r=args.lora_r, alpha=args.lora_alpha, target_names=None)
-            else:
-                lora_model = inject_lora_conv(sub_model, r=args.lora_r, alpha=args.lora_alpha, target_names=None)
-                print("[POST-NAS] Applied internal LoRAConv2d injection.")
+                    print("[POST-NAS] Applied internal LoRAConv2d injection.")
 
-            lora_model = lora_model.cuda()
-            # freeze non-lora params
-            for n, p in lora_model.named_parameters():
-                if 'lora_A' in n or 'lora_B' in n or (args.use_peft and 'lora' in n):
-                    p.requires_grad = True
-                else:
-                    p.requires_grad = False
-
-            # prepare optimizer for adapter params
-            adapter_params = [p for p in lora_model.parameters() if p.requires_grad]
-            opt = torch.optim.AdamW(adapter_params, lr=args.lora_lr)
-
-            # AMP scaler if fp16
-            scaler = GradScaler(enabled=(args.dtype == 'fp16'))
-
-            # small training loop using theta_onehots as override
-            for epoch in range(args.lora_epochs):
-                lora_model.train()
-                tot_loss = 0.0
-                ncnt = 0
-                for step, (x, y) in enumerate(train_queue):
-                    x = x.cuda(non_blocking=True)
-                    y = y.cuda(non_blocking=True)
-                    opt.zero_grad(set_to_none=True)
-                    # forward with theta_list override; FBNet.forward signature supports theta_list param
-                    with (autocast(dtype=torch.float16) if args.dtype == 'fp16' else torch.cuda.amp.autocast(enabled=False)):
-                        loss, ce, lat, acc, ener = lora_model(x, y, temperature=1.0, theta_list=theta_onehots)
-                    if args.dtype == 'fp16':
-                        scaler.scale(loss).backward()
-                        scaler.step(opt)
-                        scaler.update()
+                lora_model = lora_model.cuda()
+                # freeze non-lora params
+                for n, p in lora_model.named_parameters():
+                    if 'lora_A' in n or 'lora_B' in n or (args.use_peft and 'lora' in n):
+                        p.requires_grad = True
                     else:
-                        loss.backward()
-                        opt.step()
-                    tot_loss += float(loss.detach().cpu().item())
-                    ncnt += x.size(0)
-                avg_loss = tot_loss / (max(1, ncnt))
-                print(f"[POST-NAS][{arch_name}] Epoch {epoch+1}/{args.lora_epochs}  avg_loss={avg_loss:.4f}")
+                        p.requires_grad = False
 
-            # save adapter-only state
-            adapter_path = os.path.join(adapters_dir, f"{arch_name}_lora.pt")
-            try:
-                # if peft used and has save_pretrained, use it
-                if use_peft and hasattr(lora_model, "save_pretrained"):
-                    # save full peft adapter dir
-                    save_dir = os.path.join(adapters_dir, f"{arch_name}_peft")
-                    lora_model.save_pretrained(save_dir)
-                    print(f"[POST-NAS] Saved PEFT adapters to {save_dir}")
-                else:
-                    save_lora(lora_model, adapter_path)
-                    print(f"[POST-NAS] Saved LoRA adapter state_dict → {adapter_path}")
-            except Exception as e:
-                print("[POST-NAS] Adapter save failed:", e)
+                # prepare optimizer for adapter params
+                adapter_params = [p for p in lora_model.parameters() if p.requires_grad]
+                opt = torch.optim.AdamW(adapter_params, lr=args.lora_lr)
 
-        print("\n[POST-NAS] LoRA fine-tune completed for all selected architectures.")
+                # AMP scaler if fp16
+                scaler = GradScaler(enabled=(args.dtype == 'fp16'))
+
+                # small training loop using theta_onehots as override
+                for epoch in range(args.lora_epochs):
+                    lora_model.train()
+                    tot_loss = 0.0
+                    ncnt = 0
+                    for step, (x, y) in enumerate(train_queue):
+                        x = x.cuda(non_blocking=True)
+                        y = y.cuda(non_blocking=True)
+                        opt.zero_grad(set_to_none=True)
+                        # forward with theta_list override; FBNet.forward signature supports theta_list param
+                        with (autocast(dtype=torch.float16) if args.dtype == 'fp16' else torch.cuda.amp.autocast(enabled=False)):
+                            loss, ce, lat, acc, ener = lora_model(x, y, temperature=1.0, theta_list=theta_onehots)
+                        if args.dtype == 'fp16':
+                            scaler.scale(loss).backward()
+                            scaler.step(opt)
+                            scaler.update()
+                        else:
+                            loss.backward()
+                            opt.step()
+                        tot_loss += float(loss.detach().cpu().item())
+                        ncnt += x.size(0)
+                    avg_loss = tot_loss / (max(1, ncnt))
+                    print(f"[POST-NAS][{arch_name}] Epoch {epoch+1}/{args.lora_epochs}  avg_loss={avg_loss:.4f}")
+
+                # save adapter-only state
+                adapter_path = os.path.join(adapters_dir, f"{arch_name}_lora.pt")
+                try:
+                    # if peft used and has save_pretrained, use it
+                    if use_peft and hasattr(lora_model, "save_pretrained"):
+                        # save full peft adapter dir
+                        save_dir = os.path.join(adapters_dir, f"{arch_name}_peft")
+                        lora_model.save_pretrained(save_dir)
+                        print(f"[POST-NAS] Saved PEFT adapters to {save_dir}")
+                    else:
+                        save_lora(lora_model, adapter_path)
+                        print(f"[POST-NAS] Saved LoRA adapter state_dict → {adapter_path}")
+                except Exception as e:
+                    print("[POST-NAS] Adapter save failed:", e)
+
+            print("\n[POST-NAS] LoRA fine-tune completed for all selected architectures.")
